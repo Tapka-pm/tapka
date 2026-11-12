@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>embedded</DebugType>
+    <DefineConstants Condition="'$(TapkaTestBuild)' == 'true'">$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.0" />
+    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.git.exe" Condition="'$(TapkaShimPath)' != ''" />
+  </ItemGroup>
+  <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">
+    <Error Text="Run build.ps1 to compile and embed the native Git shim." />
+  </Target>
+</Project>

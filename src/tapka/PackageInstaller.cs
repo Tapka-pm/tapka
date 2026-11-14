@@ -7,8 +7,9 @@ namespace Tapka;
 internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http)
 {
     private const string InstallMarker = ".tapka-version";
+    private const string InstallSelector = ".tapka-selector";
 
-    public async Task InstallAsync(string id, string architecture, CancellationToken cancellationToken)
+    public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(scope.Root);
         using var installLock = await AcquireLockAsync(cancellationToken);
@@ -19,7 +20,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         var visiting = new HashSet<string>(StringComparer.Ordinal);
         var resolved = new HashSet<string>(StringComparer.Ordinal);
 
-        async Task ResolveAsync(string package)
+        async Task ResolveAsync(string package, string? requestedVersion = null)
         {
             if (resolved.Contains(package))
             {
@@ -31,7 +32,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 throw new IOException($"Dependency cycle at package '{package}'.");
             }
 
-            var release = await repository.ResolveAsync(package, architecture, cancellationToken);
+            var selector = requestedVersion ?? ReadSelector(Path.Combine(packages, package));
+            var release = await repository.ResolveAsync(package, selector ?? "latest", architecture, cancellationToken);
             foreach (var dependency in release.Dependencies)
             {
                 await ResolveAsync(dependency);
@@ -57,32 +59,60 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             plan.Add(release);
         }
 
-        await ResolveAsync(id);
+        await ResolveAsync(id, version);
         shims.CheckConflicts(plan, packages);
         foreach (var release in plan)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var destination = Path.Combine(packages, release.Id);
+            var previousSelector = ReadSelector(destination);
+            var selector = release.Id == id ? version : previousSelector;
             var installed = IsInstalled(packages, release);
             if (installed)
             {
                 shims.Publish(release);
+                if (selector is not null && selector != previousSelector)
+                {
+                    WriteSelector(destination, selector);
+                }
             }
             else
             {
-                await InstallPackageAsync(release, packages, destination, shims, powerShell, cancellationToken);
+                await InstallPackageAsync(release, packages, destination, shims, powerShell, selector, cancellationToken);
             }
 
             powerShell = shims.FindPowerShell() ?? powerShell;
+            var name = selector is null or "latest" ? release.Id : $"{release.Id}@{selector}";
             Console.WriteLine(installed
-                ? $"{release.Id} {release.Version} is already installed at \"{destination}\"."
-                : $"Installed {release.Id} {release.Version} at \"{destination}\".");
+                ? $"{name} {release.Version} is already installed at \"{destination}\"."
+                : $"Installed {name} {release.Version} at \"{destination}\".");
         }
 
         var commands = plan.SelectMany(release => release.Commands.Keys).ToArray();
         if (commands.Length > 0)
         {
             scope.RegisterShims(shims.DirectoryPath, commands);
+        }
+    }
+
+    private static string? ReadSelector(string destination)
+    {
+        var path = Path.Combine(destination, InstallSelector);
+        return File.Exists(path) ? File.ReadAllText(path) : null;
+    }
+
+    private static void WriteSelector(string destination, string selector)
+    {
+        var path = Path.Combine(destination, InstallSelector);
+        var temporary = path + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, selector);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporary);
         }
     }
 
@@ -118,7 +148,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     }
 
     private async Task InstallPackageAsync(PackageRelease release, string packages, string destination,
-        PackageShims shims, string? powerShell, CancellationToken cancellationToken)
+        PackageShims shims, string? powerShell, string? selector, CancellationToken cancellationToken)
     {
         // Stage beside the package so publishing and restoring it are same-volume renames.
         var staging = Directory.CreateDirectory(Path.Combine(packages, $".{release.Id}-{Guid.NewGuid():N}")).FullName;
@@ -151,6 +181,10 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             }
 
             await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallMarker), release.Version, cancellationToken);
+            if (selector is not null)
+            {
+                await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallSelector), selector, cancellationToken);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             if (Directory.Exists(destination))
             {

@@ -18,7 +18,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
 
     private readonly Uri? remote = GetRemoteSource(source);
 
-    public async Task<PackageRelease> ResolveAsync(string id, string architecture,
+    public async Task<PackageRelease> ResolveAsync(string id, string requestedVersion, string architecture,
         CancellationToken cancellationToken)
     {
         ValidateId(id);
@@ -32,8 +32,9 @@ internal sealed class PackageRepository(HttpClient http, string source)
                 throw new InvalidDataException($"The recipe ID does not match '{id}'.");
             }
 
-            var version = RequiredString(config, "version");
-            if (!config.GetProperty("architectures").TryGetProperty(architecture, out var target))
+            var (version, release) = ResolveVersion(config, requestedVersion);
+
+            if (!release.GetProperty("architectures").TryGetProperty(architecture, out var target))
             {
                 throw new InvalidDataException($"Version '{version}' is unavailable for Windows {architecture}.");
             }
@@ -85,7 +86,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
                 }
             }
 
-            var dependencies = config.GetProperty("dependencies").EnumerateArray()
+            var dependencies = release.GetProperty("dependencies").EnumerateArray()
                 .Select(dependency => ValidateId(dependency.GetString())).ToArray();
             return new PackageRelease(id, version, dependencies, url, checksum, script, commands);
         }
@@ -94,6 +95,43 @@ internal sealed class PackageRepository(HttpClient http, string source)
         {
             throw new IOException($"Invalid recipe for '{id}': {error.Message}", error);
         }
+    }
+
+    private static (string Version, JsonElement Release) ResolveVersion(JsonElement config, string requestedVersion)
+    {
+        if (!config.TryGetProperty("versions", out var versions))
+        {
+            var current = RequiredString(config, "version");
+            if (requestedVersion != "latest" && requestedVersion != current)
+            {
+                throw new InvalidDataException($"Version or alias '{requestedVersion}' was not found.");
+            }
+
+            return (current, config);
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var version = requestedVersion;
+        while (visited.Add(version))
+        {
+            if (!versions.TryGetProperty(version, out var release))
+            {
+                throw new InvalidDataException($"Version or alias '{version}' was not found.");
+            }
+
+            switch (RequiredString(release, "type"))
+            {
+                case "package":
+                    return (version, release);
+                case "alias":
+                    version = RequiredString(release, "to");
+                    break;
+                default:
+                    throw new InvalidDataException($"Unsupported version type at '{version}'.");
+            }
+        }
+
+        throw new InvalidDataException($"Version alias cycle at '{version}'.");
     }
 
     public Task<byte[]> ReadScriptAsync(PackageRelease release, CancellationToken cancellationToken) =>

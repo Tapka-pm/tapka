@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string] $Binary = (Join-Path $PSScriptRoot 'artifacts/test/tapka.exe')
+    [string] $Binary = (Join-Path $PSScriptRoot 'artifacts/test/tapka.exe'),
+    [string] $Repository
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,10 +21,13 @@ function Invoke-Checked {
 
 try {
     Invoke-Checked $binaryPath @('--help')
-    Invoke-Checked $binaryPath @('install', 'git', '--root', $testRoot)
+    $installOptions = @('--root', $testRoot)
+    if ($Repository) { $installOptions += @('--repository', $Repository) }
+    Invoke-Checked $binaryPath (@('install', 'git') + $installOptions)
     $marker = Join-Path $testRoot 'packages/git/.tapka-version'
     $installedAt = (Get-Item -LiteralPath $marker).LastWriteTimeUtc
-    Invoke-Checked $binaryPath @('install', 'git', '--root', $testRoot)
+    $version = Get-Content -LiteralPath $marker -Raw
+    Invoke-Checked $binaryPath (@('install', "git@$version") + $installOptions)
 
     $testPath = Get-Content -LiteralPath (Join-Path $testRoot 'user-path.txt') -Raw
     if ($testPath -ne $shimDirectory -or (Get-Item -LiteralPath $marker).LastWriteTimeUtc -ne $installedAt) {

@@ -47,7 +47,7 @@ internal sealed class InstallScope(string root, bool isTest)
 #endif
     }
 
-    public void RegisterShims(string shims)
+    public void RegisterShims(string shims, IEnumerable<string> commands)
     {
         string updatedPath;
         string? precedingPath;
@@ -90,10 +90,13 @@ internal sealed class InstallScope(string root, bool isTest)
             precedingPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine);
         }
 
-        var git = FindGit(precedingPath + ";" + updatedPath);
-        if (git is not null && !git.Equals(Path.Combine(shims, "git.exe"), StringComparison.OrdinalIgnoreCase))
+        foreach (var command in commands)
         {
-            Console.Error.WriteLine($"tapka: warning: PATH resolves git.exe to \"{git}\" before the tapka shim.");
+            var resolved = FindCommand(precedingPath + ";" + updatedPath, command);
+            if (resolved is not null && !resolved.Equals(Path.Combine(shims, command), StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine($"tapka: warning: PATH resolves {command} to \"{resolved}\" before the tapka shim.");
+            }
         }
     }
 
@@ -122,13 +125,13 @@ internal sealed class InstallScope(string root, bool isTest)
         return string.Join(';', entries);
     }
 
-    private static string? FindGit(string path)
+    private static string? FindCommand(string path, string command)
     {
         foreach (var entry in path.Split(';'))
         {
-            if (Normalize(entry) is { } directory && File.Exists(Path.Combine(directory, "git.exe")))
+            if (Normalize(entry) is { } directory && File.Exists(Path.Combine(directory, command)))
             {
-                return Path.Combine(directory, "git.exe");
+                return Path.Combine(directory, command);
             }
         }
 

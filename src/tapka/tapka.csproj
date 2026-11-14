@@ -11,9 +11,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="2.0.0" />
-    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.git.exe" Condition="'$(TapkaShimPath)' != ''" />
+    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" Condition="'$(TapkaShimPath)' != ''" />
   </ItemGroup>
   <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">
-    <Error Text="Run build.ps1 to compile and embed the native Git shim." />
+    <Error Text="Run build.ps1 to compile and embed the native command shim." />
   </Target>
 </Project>

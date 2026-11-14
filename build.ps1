@@ -18,11 +18,11 @@ if (!$PSBoundParameters.ContainsKey('Zig') -and (Test-Path -LiteralPath $localZi
 }
 $output = Join-Path $artifacts $flavor
 $build = Join-Path $artifacts "build/$flavor"
-$shim = Join-Path $build 'git.exe'
+$shim = Join-Path $build 'shim.exe'
 $testBuild = if ($Test) { 'true' } else { 'false' }
 
 New-Item -ItemType Directory -Path $build -Force | Out-Null
-$source = Join-Path $PSScriptRoot 'src/shim/git.c'
+$source = Join-Path $PSScriptRoot 'src/shim/launcher.c'
 & $Zig cc -target x86_64-windows-gnu -municode -O2 -s -Wall -Wextra -Werror $source -o $shim
 if ($LASTEXITCODE -ne 0) { throw "Shim compilation failed with exit code $LASTEXITCODE." }
 

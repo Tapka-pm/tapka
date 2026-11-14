@@ -4,7 +4,7 @@
 
 ## Сборка
 
-Для сборки нужны .NET 11 SDK и Zig. Скрипт ищет их в каталоге проекта `artifacts\tools` и в `PATH`. Параметры `-DotNet` и `-Zig` принимают полные пути к инструментам. [.NET 11 SDK](https://dotnet.microsoft.com/download/dotnet/11.0), [Zig](https://ziglang.org/download/)
+Для сборки нужны .NET 11 SDK и Visual Studio Build Tools с рабочей нагрузкой «Разработка классических приложений на C++» (MSVC x64 и Windows SDK). Скрипт ищет .NET SDK в `artifacts\tools` и `PATH`; параметр `-DotNet` принимает путь к `dotnet.exe`. Для компилятора shim сначала используется `cl.exe` из `PATH`, затем поиск через `vswhere.exe` и инициализация MSVC x64 через `vcvarsall.bat`. [.NET 11 SDK](https://dotnet.microsoft.com/download/dotnet/11.0), [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
 | Команда | Результат |
 | --- | --- |

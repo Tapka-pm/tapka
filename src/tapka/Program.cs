@@ -3,9 +3,9 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Tapka;
 
-var package = new Argument<string>("package") { Description = "Package ID or ID@version. Defaults to the latest release." };
+var package = new Argument<string>("package") { Description = "Package ID." };
 var source = new Option<string>("--repository") { Description = "HTTPS base URL or local path to the Tapka package repository." };
-var install = new Command("install", "Install a package for the current user.") { package, source };
+var install = new Command("install", "Install the latest release of a package for the current user.") { package, source };
 var root = new RootCommand("Portable package manager for Windows.") { install };
 
 #if TAPKA_TEST_BUILD
@@ -30,11 +30,10 @@ install.SetAction(async (parseResult, cancellationToken) =>
 
     try
     {
-        var packageReference = parseResult.GetRequiredValue(package).Split('@', 2);
-        var requestedVersion = packageReference.Length == 2 ? packageReference[1] : "latest";
-        if (string.IsNullOrWhiteSpace(packageReference[0]) || string.IsNullOrWhiteSpace(requestedVersion))
+        var id = parseResult.GetRequiredValue(package);
+        if (string.IsNullOrWhiteSpace(id) || id.Contains('@'))
         {
-            throw new ArgumentException("Specify a package ID as <package> or <package>@<version>.");
+            throw new ArgumentException("Specify only the package ID. Tapka installs the latest release.");
         }
 
 #if TAPKA_TEST_BUILD
@@ -44,8 +43,7 @@ install.SetAction(async (parseResult, cancellationToken) =>
 #endif
         using var http = new HttpClient();
         var repository = new PackageRepository(http, parseResult.GetValue(source) ?? PackageRepository.DefaultSource);
-        await new PackageInstaller(scope, repository, http).InstallAsync(packageReference[0].ToLowerInvariant(),
-            requestedVersion, architecture, cancellationToken);
+        await new PackageInstaller(scope, repository, http).InstallAsync(id.ToLowerInvariant(), architecture, cancellationToken);
         return 0;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

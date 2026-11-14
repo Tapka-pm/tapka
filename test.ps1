@@ -26,8 +26,7 @@ try {
     Invoke-Checked $binaryPath (@('install', 'git') + $installOptions)
     $marker = Join-Path $testRoot 'packages/git/.tapka-version'
     $installedAt = (Get-Item -LiteralPath $marker).LastWriteTimeUtc
-    $version = Get-Content -LiteralPath $marker -Raw
-    Invoke-Checked $binaryPath (@('install', "git@$version") + $installOptions)
+    Invoke-Checked $binaryPath (@('install', 'git') + $installOptions)
 
     $testPath = Get-Content -LiteralPath (Join-Path $testRoot 'user-path.txt') -Raw
     if ($testPath -ne $shimDirectory -or (Get-Item -LiteralPath $marker).LastWriteTimeUtc -ne $installedAt) {

@@ -18,7 +18,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
 
     private readonly Uri? remote = GetRemoteSource(source);
 
-    public async Task<PackageRelease> ResolveAsync(string id, string requestedVersion, string architecture,
+    public async Task<PackageRelease> ResolveAsync(string id, string architecture,
         CancellationToken cancellationToken)
     {
         ValidateId(id);
@@ -32,38 +32,8 @@ internal sealed class PackageRepository(HttpClient http, string source)
                 throw new InvalidDataException($"The recipe ID does not match '{id}'.");
             }
 
-            var versions = config.GetProperty("versions");
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-            var version = requestedVersion;
-            JsonElement release;
-            do
-            {
-                if (!visited.Add(version))
-                {
-                    throw new InvalidDataException($"Version alias cycle at '{version}'.");
-                }
-
-                if (!versions.TryGetProperty(version, out release))
-                {
-                    throw new InvalidDataException($"Version '{version}' was not found.");
-                }
-
-                var type = RequiredString(release, "type");
-                if (type == "package")
-                {
-                    break;
-                }
-
-                if (type != "alias")
-                {
-                    throw new InvalidDataException($"Unsupported version type '{type}'.");
-                }
-
-                version = RequiredString(release, "to");
-            }
-            while (true);
-
-            if (!release.GetProperty("architectures").TryGetProperty(architecture, out var target))
+            var version = RequiredString(config, "version");
+            if (!config.GetProperty("architectures").TryGetProperty(architecture, out var target))
             {
                 throw new InvalidDataException($"Version '{version}' is unavailable for Windows {architecture}.");
             }
@@ -115,7 +85,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
                 }
             }
 
-            var dependencies = release.GetProperty("dependencies").EnumerateArray()
+            var dependencies = config.GetProperty("dependencies").EnumerateArray()
                 .Select(dependency => ValidateId(dependency.GetString())).ToArray();
             return new PackageRelease(id, version, dependencies, url, checksum, script, commands);
         }

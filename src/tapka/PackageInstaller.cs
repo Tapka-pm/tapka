@@ -8,7 +8,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
 {
     private const string InstallMarker = ".tapka-version";
 
-    public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken)
+    public async Task InstallAsync(string id, string architecture, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(scope.Root);
         using var installLock = await AcquireLockAsync(cancellationToken);
@@ -19,7 +19,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         var visiting = new HashSet<string>(StringComparer.Ordinal);
         var resolved = new HashSet<string>(StringComparer.Ordinal);
 
-        async Task ResolveAsync(string package, string requestedVersion)
+        async Task ResolveAsync(string package)
         {
             if (resolved.Contains(package))
             {
@@ -31,10 +31,10 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 throw new IOException($"Dependency cycle at package '{package}'.");
             }
 
-            var release = await repository.ResolveAsync(package, requestedVersion, architecture, cancellationToken);
+            var release = await repository.ResolveAsync(package, architecture, cancellationToken);
             foreach (var dependency in release.Dependencies)
             {
-                await ResolveAsync(dependency, "latest");
+                await ResolveAsync(dependency);
             }
 
             if (release.Script is not null && !IsInstalled(packages, release) && powerShell is null &&
@@ -45,7 +45,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                     throw new IOException($"Installing '{package}' requires an existing PowerShell 7 installation.");
                 }
 
-                await ResolveAsync("powershell", "latest");
+                await ResolveAsync("powershell");
                 if (!plan.Any(candidate => candidate.Id == "powershell" && candidate.Commands.ContainsKey("pwsh.exe")))
                 {
                     throw new IOException("The PowerShell package must provide 'pwsh.exe' to run installation scripts.");
@@ -57,7 +57,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             plan.Add(release);
         }
 
-        await ResolveAsync(id, version);
+        await ResolveAsync(id);
         shims.CheckConflicts(plan, packages);
         foreach (var release in plan)
         {

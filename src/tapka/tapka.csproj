@@ -10,7 +10,7 @@
     <DefineConstants Condition="'$(TapkaTestBuild)' == 'true'">$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.0.0" />
+    <PackageReference Include="System.CommandLine" Version="3.0.0" />
     <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" Condition="'$(TapkaShimPath)' != ''" />
   </ItemGroup>
   <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">

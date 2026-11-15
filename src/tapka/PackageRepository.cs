@@ -19,6 +19,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
         @"\A(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|\z)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private readonly Uri? remote = GetRemoteSource(source);
+    public string Source => remote?.AbsoluteUri ?? Path.GetFullPath(source);
 
     public async Task<PackageRelease> ResolveAsync(string id, string requestedVersion, string architecture,
         CancellationToken cancellationToken)
@@ -130,7 +131,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
         return dependencies.ToArray();
     }
 
-    private static string NormalizeCommand(string? name)
+    internal static string NormalizeCommand(string? name)
     {
         if (name is null || !CommandName.IsMatch(name) || DeviceName.IsMatch(name))
         {
@@ -215,7 +216,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
         return null;
     }
 
-    private static string ValidateId(string? id)
+    internal static string ValidateId(string? id)
     {
         if (id is null || !PackageId.IsMatch(id) || DeviceName.IsMatch(id))
         {
@@ -229,7 +230,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
         value.GetProperty(name).GetString() is { } text && !string.IsNullOrWhiteSpace(text) ? text :
             throw new InvalidDataException($"'{name}' must be a non-empty string.");
 
-    private static string RelativePath(string? path)
+    internal static string RelativePath(string? path)
     {
         var normalized = path?.Replace('/', '\\');
         if (normalized is null || !normalized.Split('\\').All(IsPathSegment))

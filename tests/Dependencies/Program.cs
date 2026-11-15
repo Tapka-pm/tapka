@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -77,6 +78,11 @@ try
     static object Rename(string id, params (string Name, string Alias)[] names) =>
         new { id, rename = names.ToDictionary(pair => pair.Name, pair => pair.Alias) };
     Task Install(string id, string selector = "latest") => installer.InstallAsync(id, selector, arch, CancellationToken.None);
+    async Task<InstalledPackage?> Installed(string id)
+    {
+        using var inventory = await InstalledPackages.OpenForReadAsync(scope, CancellationToken.None);
+        return inventory.Find(id);
+    }
     string PackageFile(string id, string file) => Path.Combine(installation, "packages", id, file);
     string Public(string command) => Path.Combine(shims.PublicDirectory, command + ".exe");
     string Private(string id, string command) => Path.Combine(shims.DependencyDirectory(id), command + ".exe");
@@ -108,7 +114,7 @@ try
     Recipe("a", ["d", Rename("b", ("tapka-b.EXE", "vendor-b"))], ["tapka-a"], script: installScript);
     await Install("a");
     AssertPublic("tapka-a");
-    Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && !File.Exists(PackageFile("powershell", ".tapka-selector")),
+    Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && await Installed("powershell") is { Selector: null },
         "PowerShell was not bootstrapped privately.");
     Check(!Directory.Exists(shims.DependencyDirectory("c")), "Unexpected directory for a package with no dependencies.");
     Check(!File.Exists(Private("a", "tapka-b")) && !File.Exists(Private("a", "inner-c")), "A inherited the wrong names.");
@@ -142,7 +148,8 @@ try
     File.WriteAllBytes(Public("foreign"), cmdBytes);
     var requests = handler.Requests;
     await Fails(() => Install("foreign"), "conflicts with an existing executable");
-    Check(handler.Requests == requests, "The conflicting command reached the download step.");
+    Check(handler.Requests == requests && await Installed("foreign") is null,
+        "The conflicting command was downloaded or recorded.");
 
     Recipe("a", ["d", Rename("b", ("tapka-b", "vendor-b")), Rename("c", ("tapka-c", "vendor-c"))], ["tapka-a"]);
     await Install("a");
@@ -154,7 +161,8 @@ try
     requests = handler.Requests;
     Directory.CreateDirectory(Public("tapka-b"));
     await Fails(() => Install("b", "1"));
-    Check(!File.Exists(PackageFile("b", ".tapka-selector")), "Failed promotion left an explicit selector.");
+    var privateB = await Installed("b");
+    Check(privateB is { Selector: null, InstalledAt: not null }, "Failed promotion left an explicit selector.");
     Directory.Delete(Public("tapka-b"));
     await Install("b", "1");
     Check(handler.Requests == requests, "Explicit install re-downloaded an already installed dependency.");
@@ -162,10 +170,14 @@ try
     await Install("a");
     Check(File.GetLastWriteTimeUtc(Public("tapka-b")) == shimWrittenAt, "Synchronization rewrote an unchanged shim.");
     AssertPublic("tapka-a", "tapka-b");
-    Check(File.ReadAllText(PackageFile("b", ".tapka-selector")) == "1", "Explicit dependency selector was lost.");
+    Check(await Installed("b") == privateB! with { Selector = "1" }, "Promotion changed more than the selector.");
 
+    var previousC = await Installed("c");
     Recipe("c", [], ["tapka-c", "new-c"], "2");
     await Install("c");
+    var currentC = await Installed("c");
+    Check(currentC is { Version: "2", Selector: "latest" } && currentC.InstalledAt == previousC!.InstalledAt &&
+        currentC.VersionChangedAt != previousC.VersionChangedAt, "Updating C did not preserve its first installation date.");
     AssertPublic("tapka-a", "tapka-b", "tapka-c", "new-c");
     Check(File.Exists(Private("a", "new-c")) && !File.Exists(Private("a", "old-c")) &&
         File.Exists(Private("b", "new-c")), "Updating C left stale shims in installed consumers.");
@@ -174,12 +186,76 @@ try
     Recipe("broken", ["c"], ["broken"]);
     Directory.CreateDirectory(Public("broken")); // Force publication to fail after C has been replaced.
     await Fails(() => Install("broken"));
-    Check(File.ReadAllText(PackageFile("c", ".tapka-version")) == "2", "Rollback did not restore C's files.");
+    Check(await Installed("c") == currentC && await Installed("broken") is null && File.Exists(PackageFile("c", "tool.exe")),
+        "Rollback did not restore C's files and database state.");
     Check(File.Exists(Private("a", "new-c")) && !File.Exists(Private("a", "rollback-c")),
         "Rollback did not restore A's dependency shims.");
     Check(!Directory.Exists(PackageFile("broken", "")) && !File.Exists(Public("broken")),
         "Rollback left parts of the failed installation.");
     AssertPublic("tapka-a", "tapka-b", "tapka-c", "new-c");
+
+    using (var cancel = new CancellationTokenSource())
+    {
+        handler.OnRequest = uri =>
+        {
+            if (uri.AbsolutePath == "/broken-1.zip")
+            {
+                cancel.Cancel();
+            }
+        };
+        Directory.Delete(Public("broken"));
+        try
+        {
+            await installer.InstallAsync("broken", "latest", arch, cancel.Token);
+            throw new Exception("Installation should have been cancelled.");
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+        finally
+        {
+            handler.OnRequest = null;
+        }
+    }
+    Check(await Installed("c") == currentC && await Installed("broken") is null &&
+        File.Exists(Private("a", "new-c")) && !Directory.Exists(PackageFile("broken", "")),
+        "Cancellation left files or database changes from the update.");
+
+    var failedScope = InstallScope.Create(Path.Combine(root, "database-failure"));
+    using (await InstalledPackages.OpenForReadAsync(failedScope, CancellationToken.None)) { }
+    using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = Path.Combine(failedScope.Root, "installed.db"), Pooling = false
+    }.ToString()))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        // A deferred constraint fails at COMMIT, after the package, shim and PATH were written.
+        command.CommandText = """
+            CREATE TRIGGER fail_package_commit AFTER INSERT ON commands
+            WHEN new.name = 'tapka-c.exe'
+            BEGIN
+                INSERT INTO dependencies VALUES (new.package_id, 'missing-at-commit');
+            END;
+            """;
+        command.ExecuteNonQuery();
+    }
+    var failingInstaller = new PackageInstaller(failedScope, new PackageRepository(http, repository), http, powerShell);
+    try
+    {
+        await failingInstaller.InstallAsync("c", "latest", arch, CancellationToken.None);
+        throw new Exception("SQLite should have rejected the commit.");
+    }
+    catch (SqliteException error) when (error.SqliteExtendedErrorCode == 787) { }
+    using (var inventory = await InstalledPackages.OpenForReadAsync(failedScope, CancellationToken.None))
+    {
+        Check(inventory.List().Count == 0 && !Directory.EnumerateDirectories(failedScope.PackagesDirectory).Any() &&
+            !Directory.Exists(new PackageShims(failedScope.Root).PublicDirectory) &&
+            !File.Exists(Path.Combine(failedScope.Root, "user-path.txt")), "SQLite failure did not roll back installation.");
+    }
+
+    File.Delete(PackageFile("b", "tool.exe"));
+    await Install("b", "1");
+    Check(File.Exists(PackageFile("b", "tool.exe")) && await Installed("b") == privateB! with { Selector = "1" },
+        "Reinstall did not restore a missing command or changed the original dates.");
 
     const string prepareScript = """
         param([string]$Installer, [string]$Destination)
@@ -196,7 +272,7 @@ try
     Recipe("prepared", [], ["replacement"], "2", script: prepareScript + "\nexit 23",
         files: new() { ["unprepared.exe"] = cmdBytes, ["version-2.txt"] = [] }, extract: true);
     await Fails(() => Install("prepared"), "exit code 23");
-    Check(File.ReadAllText(PackageFile("prepared", ".tapka-version")) == "1" &&
+    Check(await Installed("prepared") is { Version: "1" } &&
         !File.Exists(PackageFile("prepared", "version-2.txt")) &&
         File.Exists(Public("prepared")) && !File.Exists(Public("replacement")),
         "The failed script exposed part of the update or removed the old installation.");
@@ -254,10 +330,13 @@ internal sealed class FixtureDownloads : HttpMessageHandler
 {
     public Dictionary<string, byte[]> Payloads { get; } = new();
     public int Requests { get; private set; }
+    public Action<Uri>? OnRequest { get; set; }
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Requests++;
+        OnRequest?.Invoke(request.RequestUri!);
+        cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(Payloads[request.RequestUri!.AbsoluteUri])

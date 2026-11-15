@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using System.Formats.Tar;
 using System.IO.Compression;
@@ -47,6 +48,11 @@ internal static class ArchiveTests
         string Config(string id) => Path.Combine(recipes, id, "config.json");
         string Download(string id) => Path.Combine(downloads, id, filename);
         string Url(string id) => $"https://fixtures.tapka.invalid/{id}/{Uri.EscapeDataString(filename)}";
+        async Task<InstalledPackage?> Installed(string id)
+        {
+            using var inventory = await InstalledPackages.OpenForReadAsync(InstallScope.Create(installRoot), CancellationToken.None);
+            return inventory.Find(id);
+        }
 
         async Task Install(string id, string? error = null)
         {
@@ -126,13 +132,14 @@ internal static class ArchiveTests
         }
         Check(!File.Exists(Public("archive-test.exe")), "A failed install exposed a shim.");
 
-        var tarMarker = Package("tar", ".tapka-version");
-        var tarTimestamp = File.GetLastWriteTimeUtc(tarMarker);
+        var installedTar = await Installed("tar");
+        Check(installedTar is { Version: "1", InstalledAt: not null }, "The TAR installation was not recorded.");
         Recipe("tar", "tar", "truncated"u8.ToArray(), version: "2");
         await Install("tar", "tapka:");
-        Check(File.ReadAllText(tarMarker) == "1" && File.GetLastWriteTimeUtc(tarMarker) == tarTimestamp &&
+        Check(await Installed("tar") == installedTar &&
             File.ReadAllText(Package("tar", FileName)) == Text, "A failed update changed the installed TAR package.");
 
+        await CheckInventoryAsync(root, binary);
         await CheckInstallProcessAsync(pwsh);
 
         if (mode == "built-in")
@@ -197,7 +204,7 @@ internal static class ArchiveTests
         await Install("rollback", "mismatch");
         foreach (var id in new[] { "7zr", "7zip", "powershell", "rollback" })
         {
-            Check(!Directory.Exists(Package(id)), $"Rollback left {id} installed.");
+            Check(!Directory.Exists(Package(id)) && await Installed(id) is null, $"Rollback left {id} installed.");
         }
         await Install("seven");
         Check(File.Exists(Package("7zip", "7z.dll")) && File.Exists(Package("7zr", "7zr.exe")) &&
@@ -207,6 +214,10 @@ internal static class ArchiveTests
         foreach (var exe in new[] { "7zr.exe", "7z.exe", "pwsh.exe" })
         {
             Check(!File.Exists(Public(exe)), $"Automatic installation exposed {exe}.");
+        }
+        foreach (var id in new[] { "7zr", "7zip", "powershell" })
+        {
+            Check(await Installed(id) is { Selector: null }, $"Missing automatic package '{id}' in the registry.");
         }
         Check(!Directory.Exists(Path.Combine(installRoot, "shims", "deps", "seven")), "Archive tools became runtime dependencies.");
         await Install("seven-tail");
@@ -219,12 +230,12 @@ internal static class ArchiveTests
         {
             File.Delete(Download(id));
         }
-        var installedAt = File.GetLastWriteTimeUtc(Package("seven", ".tapka-version"));
+        var installedSeven = await Installed("seven");
         File.Move(extractorConfig, extractorConfig + ".bak");
         await Install("seven@1");
         File.Move(extractorConfig + ".bak", extractorConfig);
-        Check(File.GetLastWriteTimeUtc(Package("seven", ".tapka-version")) == installedAt &&
-            File.ReadAllText(Package("seven", ".tapka-selector")) == "1", "Reinstall rewrote the package or lost the selector.");
+        Check(installedSeven is not null && await Installed("seven") == installedSeven with { Selector = "1" },
+            "Reinstall changed the installed package record or lost the selector.");
         await Install("rar4");
         await Install("rar5");
         await Install("tar-xz");
@@ -336,6 +347,84 @@ internal static class ArchiveTests
     {
         var result = await Run(executable, directory, args);
         Check(result.ExitCode == 0, $"'{executable}' exited with {result.ExitCode}.\n{result.Output}\n{result.Error}");
+    }
+
+    private static async Task CheckInventoryAsync(string root, string binary)
+    {
+        var legacy = Path.Combine(root, "legacy installation");
+        var dependency = Directory.CreateDirectory(Path.Combine(legacy, "packages", "dep")).FullName;
+        var app = Directory.CreateDirectory(Path.Combine(legacy, "packages", "app")).FullName;
+        const string manifest = ".tapka-package.json";
+        const string marker = ".tapka-version";
+        File.WriteAllText(Path.Combine(dependency, manifest), """
+            {"Dependencies":[],"Commands":{"tool.exe":"bin/tool.exe"}}
+            """);
+        File.WriteAllText(Path.Combine(dependency, marker), "2");
+        File.WriteAllText(Path.Combine(app, manifest), "{");
+        File.WriteAllText(Path.Combine(app, ".tapka-selector"), "lts");
+
+        Task<(int ExitCode, string Output, string Error)> Command(string scope, params string[] args) =>
+            Run(binary, root, [.. args, "--root", scope]);
+
+        var invalid = await Command(legacy, "list");
+        Check(invalid.ExitCode == 1 && invalid.Error.Contains(Path.Combine(app, manifest)) &&
+            !File.Exists(Path.Combine(legacy, "installed.db")), "Malformed legacy metadata was accepted.");
+        File.WriteAllText(Path.Combine(app, manifest), """
+            {"Dependencies":[{"Id":"dep","Rename":{"tool.exe":"vendor-tool.exe"}}],"Commands":{}}
+            """);
+        var missing = await Command(legacy, "list");
+        Check(missing.ExitCode == 1 && missing.Error.Contains(Path.Combine(app, marker)), "Incomplete legacy metadata was accepted.");
+        File.WriteAllText(Path.Combine(app, marker), "1");
+
+        var results = await Task.WhenAll(Command(legacy, "list"), Command(legacy, "list", "--explicit"));
+        Check(results.All(result => result.ExitCode == 0) &&
+            results[0].Output.Contains("app\t1\tlts\texplicit") && results[0].Output.Contains("dep\t2\t-\tautomatic") &&
+            results[1].Output.Contains("app\t1\tlts\texplicit") && !results[1].Output.Contains("dep"),
+            $"Legacy inventory was not imported once. {results[0].Error} {results[1].Error}");
+        File.WriteAllText(Path.Combine(app, marker), "old marker ignored");
+        var filtered = await Command(legacy, "list", "APP");
+        Check(filtered.ExitCode == 0 && filtered.Output.Contains("app\t1\tlts\texplicit") && !filtered.Output.Contains("dep"),
+            "Filtering failed or a legacy marker changed the imported version.");
+        var info = await Command(legacy, "info", "app");
+        Check(info.ExitCode == 0 && info.Output.Contains("Repository: (unknown)") &&
+            info.Output.Contains("dep (tool.exe -> vendor-tool.exe)"), $"Incorrect package details: {info.Error}");
+        var reverse = await Command(legacy, "info", "dep");
+        Check(reverse.ExitCode == 0 && reverse.Output.Contains("  app") && reverse.Output.Contains(@"tool.exe -> bin\tool.exe"),
+            $"Missing reverse dependency or command: {reverse.Error}");
+
+        var moved = Path.Combine(root, "moved installation");
+        Directory.Move(legacy, moved);
+        var path = await Command(moved, "path", "APP");
+        Check(path.ExitCode == 0 && path.Output.TrimEnd() == Path.Combine(moved, "packages", "app"),
+            "The registry retained the original installation path.");
+        Directory.Move(Path.Combine(moved, "packages", "app"), Path.Combine(moved, "missing-app"));
+        var missingPath = await Command(moved, "path", "app");
+        Check(missingPath.ExitCode == 1 && missingPath.Output.Length == 0 && missingPath.Error.Contains("is missing"),
+            "A path was printed for a missing package directory.");
+        Check((await Command(moved, "info", "unknown")).ExitCode == 1, "Unknown package was accepted.");
+
+        var fresh = Path.Combine(root, "fresh installation");
+        var empty = await Command(fresh, "list");
+        Check(empty.ExitCode == 0 && empty.Output.Length == 0, $"Empty list failed: {empty.Error}");
+        var database = Path.Combine(fresh, "installed.db");
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database, Pooling = false
+        }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 2";
+            command.ExecuteNonQuery();
+        }
+        var unsupported = await Command(fresh, "list");
+        Check(unsupported.ExitCode == 1 && unsupported.Error.Contains("schema 2"), "An unknown schema version was accepted.");
+        File.WriteAllText(database, "not SQLite");
+        var corrupt = await Command(fresh, "list");
+        Check(corrupt.ExitCode == 1 && File.ReadAllText(database) == "not SQLite", "The corrupt database was replaced.");
+        File.WriteAllBytes(database, []);
+        var truncated = await Command(fresh, "list");
+        Check(truncated.ExitCode == 1 && new FileInfo(database).Length == 0, "The truncated database was replaced.");
     }
 
     private static async Task<(int ExitCode, string Output, string Error)> Run(string executable, string directory,

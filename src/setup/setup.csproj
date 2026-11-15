@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../InstalledPackages.props" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>tapka-setup-win-x64</AssemblyName>
@@ -14,11 +15,18 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
-    <Compile Include="../tapka/*.cs" Exclude="../tapka/Program.cs" />
+    <Compile Include="../tapka/*.cs" Exclude="../tapka/Program.cs;../tapka/InventoryCommands.cs" />
     <AssemblyMetadata Include="TapkaVersion" Value="$(Version)" />
     <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" />
   </ItemGroup>
   <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">
     <Error Text="Run build.ps1 to compile and embed the native command shim." />
+  </Target>
+  <Target Name="EmbedSqlite" BeforeTargets="AssignTargetPaths" DependsOnTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <_SqliteDll Include="@(NativeCopyLocalItems)" Condition="'%(Filename)%(Extension)' == 'e_sqlite3.dll'" />
+      <EmbeddedResource Include="@(_SqliteDll)" LogicalName="tapka.e_sqlite3.dll" />
+    </ItemGroup>
+    <Error Condition="'@(_SqliteDll)' == ''" Text="The SQLite native library for $(RuntimeIdentifier) was not resolved." />
   </Target>
 </Project>

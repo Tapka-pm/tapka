@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using System.CommandLine;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -7,6 +8,7 @@ var package = new Argument<string>("package") { Description = "Package ID or ID@
 var source = new Option<string>("--repository") { Description = "HTTPS base URL or local path to the Tapka package repository." };
 var install = new Command("install", "Install a package for the current user.") { package, source };
 var root = new RootCommand("Portable package manager for Windows.") { install };
+InventoryCommands.AddTo(root);
 
 #if TAPKA_TEST_BUILD
 var testRoot = new Option<string>("--root") { Description = "Absolute test installation directory.", Required = true };
@@ -65,7 +67,7 @@ install.SetAction(async (parseResult, cancellationToken) =>
         return 1;
     }
     catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
-        or InvalidOperationException or Win32Exception or System.Security.SecurityException or ArgumentException)
+        or InvalidOperationException or Win32Exception or System.Security.SecurityException or ArgumentException or SqliteException)
     {
         Console.Error.WriteLine($"tapka: {error.Message}");
         return 1;

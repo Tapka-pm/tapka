@@ -56,6 +56,8 @@ internal sealed class InstallTransaction(string root) : IDisposable
 
     public void Commit() => committed = true;
 
+    public void OnRollback(Action action) => undo.Add(action);
+
     public void Dispose()
     {
         var restored = true;
@@ -67,7 +69,7 @@ internal sealed class InstallTransaction(string root) : IDisposable
                 {
                     undo[index]();
                 }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
                 {
                     restored = false;
                     Console.Error.WriteLine($"tapka: rollback failed: {error.Message}");

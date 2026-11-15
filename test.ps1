@@ -24,17 +24,17 @@ try {
     $installOptions = @('--root', $testRoot)
     if ($Repository) { $installOptions += @('--repository', $Repository) }
     Invoke-Checked $binaryPath (@('install', 'git') + $installOptions)
-    $marker = Join-Path $testRoot 'packages/git/.tapka-version'
-    $version = Get-Content -LiteralPath $marker -Raw
-    $installedAt = (Get-Item -LiteralPath $marker).LastWriteTimeUtc
+    $details = Invoke-Checked $binaryPath @('info', 'git', '--root', $testRoot)
+    $version = ($details | Where-Object { $_ -clike 'Version: *' }).Substring('Version: '.Length)
+    $installedAt = $details | Where-Object { $_ -clike 'Installed at: *' }
     Invoke-Checked $binaryPath (@('install', "git@$version") + $installOptions)
 
     $testPath = Get-Content -LiteralPath (Join-Path $testRoot 'user-path.txt') -Raw
-    $selector = Get-Content -LiteralPath (Join-Path $testRoot 'packages/git/.tapka-selector') -Raw
-    if ($selector -ne $version) {
+    $details = Invoke-Checked $binaryPath @('info', 'git', '--root', $testRoot)
+    if ("Selector: $version" -cnotin $details) {
         throw 'The repeated install did not save the requested version.'
     }
-    if ($testPath -ne $shimDirectory -or (Get-Item -LiteralPath $marker).LastWriteTimeUtc -ne $installedAt) {
+    if ($testPath -ne $shimDirectory -or !$installedAt -or $installedAt -cnotin $details) {
         throw 'The repeated install changed the package or duplicated the shim directory in PATH.'
     }
     if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $savedUserPath) {

@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using System.CommandLine;
 using System.ComponentModel;
 using System.Reflection;
@@ -41,6 +42,7 @@ setup.SetAction(async (parseResult, cancellationToken) =>
         Console.WriteLine($"Installing tapka {version}...");
         var repository = new PackageRepository(http, source);
         var installer = new PackageInstaller(scope, repository, http, systemPowerShell: null);
+        using var sqlite = SetupSqlite.Load();
         await installer.InstallAsync("tapka", version, "x64", cancellationToken, verifyTapka: true);
         Console.WriteLine("Tapka is installed.");
         if (!parseResult.GetValue(noPause))
@@ -61,7 +63,7 @@ setup.SetAction(async (parseResult, cancellationToken) =>
     }
     catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
         or HttpRequestException or InvalidOperationException or Win32Exception
-        or System.Security.SecurityException or ArgumentException)
+        or System.Security.SecurityException or ArgumentException or SqliteException or DllNotFoundException)
     {
         Console.Error.WriteLine($"{name}: {error.Message}");
         return 1;

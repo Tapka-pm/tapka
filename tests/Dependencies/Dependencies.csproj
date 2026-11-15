@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../src/InstalledPackages.props" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net11.0-windows</TargetFramework>
@@ -8,7 +9,7 @@
     <ShimPath>../../artifacts/build/shim/Release/x64/shim.exe</ShimPath>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../src/tapka/*.cs" Exclude="../../src/tapka/Program.cs" />
+    <Compile Include="../../src/tapka/*.cs" Exclude="../../src/tapka/Program.cs;../../src/tapka/InventoryCommands.cs" />
     <EmbeddedResource Include="$(ShimPath)" LogicalName="tapka.shim.exe" />
   </ItemGroup>
 </Project>

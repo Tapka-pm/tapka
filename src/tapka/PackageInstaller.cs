@@ -1,24 +1,20 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 
 namespace Tapka;
 
 internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http, string? systemPowerShell)
 {
-    private const string InstallMarker = ".tapka-version";
-    private const string InstallSelector = ".tapka-selector";
-    private const string ManifestFile = ".tapka-package.json";
-
     public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken,
         bool verifyTapka = false)
     {
-        Directory.CreateDirectory(scope.Root);
-        using var installLock = await AcquireLockAsync(cancellationToken);
-        var packages = Directory.CreateDirectory(Path.Combine(scope.Root, "packages")).FullName;
+        using var installLock = await scope.AcquireInstallLockAsync(cancellationToken);
+        using var inventory = InstalledPackages.OpenForInstall(scope, cancellationToken);
+        var packages = Directory.CreateDirectory(scope.PackagesDirectory).FullName;
         var shims = new PackageShims(scope.Root);
-        var manifests = ReadManifests(packages);
+        var installedPackages = inventory.List().ToDictionary(package => package.Id);
+        var manifests = inventory.ReadManifests(installedPackages.Keys);
         var powerShell = FindTapkaPowerShell(packages, manifests.GetValueOrDefault("powershell")) ?? systemPowerShell;
         var plan = new List<PackageRelease>();
         var visiting = new HashSet<string>(StringComparer.Ordinal);
@@ -36,14 +32,15 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 throw new IOException($"Dependency cycle at package '{package}'.");
             }
 
-            var selector = requestedVersion ?? ReadSelector(Path.Combine(packages, package));
+            var previous = installedPackages.GetValueOrDefault(package);
+            var selector = requestedVersion ?? previous?.Selector;
             var release = await repository.ResolveAsync(package, selector ?? "latest", architecture, cancellationToken);
             foreach (var dependency in release.Dependencies)
             {
                 await ResolveAsync(dependency.Id);
             }
 
-            var needsInstallation = !IsInstalled(packages, release);
+            var needsInstallation = !IsInstalled(packages, release, previous, architecture);
             if (needsInstallation && PackageArchive.Needs7Zip(release.Archive))
             {
                 await ResolveAsync(PackageArchive.ExtractorPackage);
@@ -80,7 +77,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
 
         var explicitIds = manifests.Keys.Where(package =>
-            package == id || ReadSelector(Path.Combine(packages, package)) is not null).ToHashSet();
+            package == id || installedPackages.GetValueOrDefault(package)?.Selector is not null).ToHashSet();
         var publicCommands = PackageShims.PublicCommands(manifests, explicitIds);
         var dependencyCommands = manifests.Keys.ToDictionary(package => package,
             package => PackageShims.DependencyCommands(manifests, package));
@@ -91,26 +88,19 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
 
         using var transaction = new InstallTransaction(scope.Root);
+        var changes = new List<InstalledPackage>();
         var messages = new List<string>();
         foreach (var release in plan)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var destination = Path.Combine(packages, release.Id);
-            var selector = release.Id == id ? version : ReadSelector(destination);
-            var manifest = JsonSerializer.SerializeToUtf8Bytes(manifests[release.Id], PackageJsonContext.Default.PackageManifest);
+            var previous = installedPackages.GetValueOrDefault(release.Id);
+            var selector = release.Id == id ? version : previous?.Selector;
             var dependencies = shims.DependencyDirectory(release.Id);
             var commands = dependencyCommands[release.Id];
             shims.Sync(dependencies, commands, dependencyCommands, transaction);
-            var installed = IsInstalled(packages, release);
-            if (installed)
-            {
-                transaction.WriteFile(Path.Combine(destination, ManifestFile), manifest);
-                if (selector is not null)
-                {
-                    transaction.WriteFile(Path.Combine(destination, InstallSelector), Encoding.UTF8.GetBytes(selector));
-                }
-            }
-            else
+            var installed = IsInstalled(packages, release, previous, architecture);
+            if (!installed)
             {
                 var bootstrap = PackageArchive.NeedsBootstrap(release)
                     ? PackageArchive.GetTool(packages, PackageArchive.BootstrapPackage,
@@ -121,10 +111,16 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                         manifests[PackageArchive.ExtractorPackage].Commands)
                     : null;
                 var staged = await StagePackageAsync(release, transaction.CreateStagingDirectory(release.Id),
-                    commands.Count == 0 ? null : dependencies, powerShell, bootstrap, extractor, selector,
-                    manifest, cancellationToken);
+                    commands.Count == 0 ? null : dependencies, powerShell, bootstrap, extractor, cancellationToken);
                 transaction.PublishPackage(staged, destination);
             }
+
+            // A reused payload keeps its provenance even if the recipe has since changed.
+            var now = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+            changes.Add(installed && previous is not null ? previous with { Selector = selector } :
+                new InstalledPackage(release.Id, release.Version, selector, architecture, repository.Source,
+                    release.DownloadUrl.AbsoluteUri, release.Checksum, previous is null ? now : previous.InstalledAt,
+                    previous?.Version == release.Version ? previous.VersionChangedAt : now));
 
             if (release.Id == "powershell")
             {
@@ -153,8 +149,16 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 TimeSpan.FromSeconds(30));
         }
         cancellationToken.ThrowIfCancellationRequested();
+        using var databaseTransaction = inventory.BeginWrite();
+        foreach (var package in changes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            inventory.Save(package, manifests[package.Id], databaseTransaction);
+        }
         List<string> warnings = publicCommands.Count == 0 ? [] : scope.RegisterShims(shims.PublicDirectory,
             plan.Where(release => explicitIds.Contains(release.Id)).SelectMany(release => release.Commands.Keys), transaction);
+        cancellationToken.ThrowIfCancellationRequested();
+        databaseTransaction.Commit();
         transaction.Commit();
         foreach (var message in messages)
         {
@@ -166,75 +170,17 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
     }
 
-    private static string? ReadSelector(string destination)
-    {
-        var path = Path.Combine(destination, InstallSelector);
-        return File.Exists(Path.Combine(destination, ManifestFile)) && File.Exists(path) ? File.ReadAllText(path) : null;
-    }
-
-    private static Dictionary<string, PackageManifest> ReadManifests(string packages)
-    {
-        var manifests = new Dictionary<string, PackageManifest>(StringComparer.Ordinal);
-        foreach (var directory in Directory.EnumerateDirectories(packages))
-        {
-            var path = Path.Combine(directory, ManifestFile);
-            if (!File.Exists(path))
-            {
-                continue;
-            }
-            try
-            {
-                var manifest = JsonSerializer.Deserialize(File.ReadAllBytes(path), PackageJsonContext.Default.PackageManifest)
-                    ?? throw new JsonException();
-                var dependencies = manifest.Dependencies.Select(dependency => new PackageDependency(dependency.Id,
-                    new Dictionary<string, string>(dependency.Rename, StringComparer.OrdinalIgnoreCase))).ToArray();
-                manifests.Add(Path.GetFileName(directory), new PackageManifest(dependencies,
-                    new Dictionary<string, string>(manifest.Commands, StringComparer.OrdinalIgnoreCase)));
-            }
-            catch (JsonException error)
-            {
-                throw new IOException($"Invalid package metadata in '{path}'.", error);
-            }
-        }
-        return manifests;
-    }
-
-    private static bool IsInstalled(string packages, PackageRelease release)
+    private static bool IsInstalled(string packages, PackageRelease release, InstalledPackage? previous, string architecture)
     {
         var destination = Path.Combine(packages, release.Id);
-        var marker = Path.Combine(destination, InstallMarker);
-        return File.Exists(Path.Combine(destination, ManifestFile)) &&
-            File.Exists(marker) && File.ReadAllText(marker) == release.Version &&
+        return previous is not null && previous.Version == release.Version &&
+            (previous.Architecture is null || previous.Architecture == architecture) && Directory.Exists(destination) &&
             release.Commands.Values.All(command => File.Exists(Path.Combine(destination, command))) &&
             PackageArchive.HasToolFiles(destination, release.Id, release.Commands);
     }
 
-    private async Task<FileStream> AcquireLockAsync(CancellationToken cancellationToken)
-    {
-        var lockFile = Path.Combine(scope.Root, ".install.lock");
-        var elapsed = Stopwatch.StartNew();
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                return File.Open(lockFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            }
-            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
-            {
-                if (elapsed.Elapsed >= TimeSpan.FromMinutes(10))
-                {
-                    throw new IOException("Timed out waiting for another tapka installation to finish.", error);
-                }
-
-                await Task.Delay(200, cancellationToken);
-            }
-        }
-    }
-
     private async Task<string> StagePackageAsync(PackageRelease release, string staging, string? dependencies,
-        string? powerShell, string? bootstrap, string? extractor, string? selector, byte[] manifest,
-        CancellationToken cancellationToken)
+        string? powerShell, string? bootstrap, string? extractor, CancellationToken cancellationToken)
     {
         var installerDirectory = Directory.CreateDirectory(Path.Combine(staging, "download")).FullName;
         var installer = Path.Combine(installerDirectory, PackageRepository.GetDownloadFilename(release.DownloadUrl));
@@ -265,17 +211,6 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             throw new IOException($"Package '{release.Id}' did not provide the required extractor files.");
         }
 
-        await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallMarker), release.Version, cancellationToken);
-        await File.WriteAllBytesAsync(Path.Combine(stagedPackage, ManifestFile), manifest, cancellationToken);
-        var selectorPath = Path.Combine(stagedPackage, InstallSelector);
-        if (selector is null)
-        {
-            File.Delete(selectorPath);
-        }
-        else
-        {
-            await File.WriteAllTextAsync(selectorPath, selector, cancellationToken);
-        }
         cancellationToken.ThrowIfCancellationRequested();
         return stagedPackage;
     }

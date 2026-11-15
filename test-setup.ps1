@@ -12,6 +12,7 @@ $work = (New-Item -ItemType Directory -Path (Join-Path $base "setup $([Guid]::Ne
 $repo = Join-Path $work 'catalog'
 $downloads = Join-Path $work 'downloads'
 $setup = Join-Path $PSScriptRoot 'artifacts/test/tapka-setup-win-x64.exe'
+$client = Join-Path $PSScriptRoot 'artifacts/test/tapka.exe'
 $zipName = 'tapka-win-x64.zip'
 $zip = Join-Path $PSScriptRoot "artifacts/release/$zipName"
 
@@ -38,7 +39,7 @@ Add-Type -AssemblyName System.IO.Compression
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $entries = @($archive.Entries.FullName)
-    foreach ($expected in 'tapka.exe', 'tapka.dll', 'tapka.runtimeconfig.json', 'tapka.deps.json') {
+    foreach ($expected in 'tapka.exe', 'tapka.dll', 'tapka.runtimeconfig.json', 'tapka.deps.json', 'e_sqlite3.dll') {
         if ($expected -notin $entries) { throw "The release ZIP is missing $expected." }
     }
     if ($entries | Where-Object { $_ -match '(^|/)(dotnet|pwsh)\.exe$|(^|/)coreclr\.dll$' }) {
@@ -85,9 +86,14 @@ try {
     $shim = Join-Path $public 'tapka.exe'
     & $shim --help
     if ($LASTEXITCODE) { throw 'The installed shim could not start tapka with its private runtime.' }
+    $installed = & $client list --root $root
+    if ($LASTEXITCODE -or "tapka`t$Version`t$Version`texplicit" -cnotin $installed -or
+        !($installed -cmatch '^dotnet-runtime-11\t[^\t]+\t-\tautomatic$') -or
+        !($installed -cmatch '^powershell\t[^\t]+\t-\tautomatic$')) {
+        throw 'The client could not read the expected packages from the setup database.'
+    }
     if ((Get-ChildItem -LiteralPath $public -Name) -ne 'tapka.exe' -or
-        !(Test-Path -LiteralPath (Join-Path $root 'packages/powershell/pwsh.exe')) -or
-        (Get-Content -LiteralPath (Join-Path $root 'packages/tapka/.tapka-version') -Raw) -ne $Version) {
+        !(Test-Path -LiteralPath (Join-Path $root 'packages/powershell/pwsh.exe'))) {
         throw 'Setup did not install the expected version and private dependencies.'
     }
     & $setup @options
@@ -103,6 +109,8 @@ try {
         (Test-Path -LiteralPath (Join-Path $failedRoot 'user-path.txt'))) {
         throw 'A bad client hash did not roll back installation.'
     }
+    $failedInventory = & $client list --root $failedRoot
+    if ($LASTEXITCODE -or $failedInventory) { throw 'The failed setup left packages in the database.' }
     if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $oldUserPath) {
         throw 'Test setup altered the real user PATH.'
     }

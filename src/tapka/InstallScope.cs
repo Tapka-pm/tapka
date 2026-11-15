@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
@@ -11,6 +12,30 @@ internal sealed class InstallScope(string root, bool isTest)
     private const uint AbortIfHung = 0x0002;
 
     public string Root { get; } = root;
+    public string PackagesDirectory => Path.Combine(Root, "packages");
+
+    public async Task<FileStream> AcquireInstallLockAsync(CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Root);
+        var lockFile = Path.Combine(Root, ".install.lock");
+        var elapsed = Stopwatch.StartNew();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return File.Open(lockFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+            {
+                if (elapsed.Elapsed >= TimeSpan.FromMinutes(10))
+                {
+                    throw new IOException("Timed out waiting for another tapka installation to finish.", error);
+                }
+                await Task.Delay(200, cancellationToken);
+            }
+        }
+    }
 
     public static InstallScope Create(string? testRoot = null)
     {
@@ -81,10 +106,31 @@ internal sealed class InstallScope(string root, bool isTest)
         if (userPath != updatedUserPath)
         {
             environment.SetValue("Path", updatedUserPath, kind);
-            SendMessageTimeout(BroadcastWindow, SettingChange, UIntPtr.Zero, "Environment", AbortIfHung, 1000, out _);
+            transaction.OnRollback(() =>
+            {
+                using var key = Registry.CurrentUser.CreateSubKey("Environment", writable: true);
+                if (!Equals(key.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames), updatedUserPath) ||
+                    key.GetValueKind("Path") != kind)
+                {
+                    return;
+                }
+                if (value is null)
+                {
+                    key.DeleteValue("Path", throwOnMissingValue: false);
+                }
+                else
+                {
+                    key.SetValue("Path", value, kind);
+                }
+                BroadcastEnvironmentChange();
+            });
+            BroadcastEnvironmentChange();
         }
         return userWarnings;
     }
+
+    private static void BroadcastEnvironmentChange() =>
+        SendMessageTimeout(BroadcastWindow, SettingChange, UIntPtr.Zero, "Environment", AbortIfHung, 1000, out _);
 
     private static List<string> GetWarnings(string? precedingPath, string updatedPath, string shims, IEnumerable<string> commands)
     {

@@ -155,6 +155,8 @@ internal static class PackageArchive
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var entries = false;
         var hasPath = false;
+        var trailingDataWarning = false;
+        var warningSummary = false;
         while (await output.ReadLineAsync(cancellationToken) is { } line)
         {
             if (!entries)
@@ -162,6 +164,10 @@ internal static class PackageArchive
                 if (line == "----------")
                 {
                     entries = true;
+                }
+                else if (line == "There are data after the end of archive")
+                {
+                    trailingDataWarning = true;
                 }
                 else if (line == "Multivolume = +" ||
                     line.StartsWith("Volumes = ", StringComparison.Ordinal) && line != "Volumes = 1" ||
@@ -178,8 +184,14 @@ internal static class PackageArchive
                 hasPath = false;
                 continue;
             }
+            // A signed self-extracting archive can have a signature after the archive data.
+            if (!hasPath && trailingDataWarning && !warningSummary && line == "Warnings: 1")
+            {
+                warningSummary = true;
+                continue;
+            }
             var separator = line.IndexOf(" = ", StringComparison.Ordinal);
-            if (separator < 1 || (!hasPath && !line.StartsWith("Path = ", StringComparison.Ordinal)))
+            if (warningSummary || separator < 1 || (!hasPath && !line.StartsWith("Path = ", StringComparison.Ordinal)))
             {
                 throw new InvalidDataException("Invalid 7-Zip archive listing.");
             }

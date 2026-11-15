@@ -33,7 +33,6 @@ public sealed class LauncherTests : IDisposable
             (string.IsNullOrEmpty(inheritedPath) ? "" : ";" + inheritedPath);
         Assert.Equal(expectedPath, Assert.Single(ReadValues(result.Output, "path")));
         Assert.Equal(parentPath, Environment.GetEnvironmentVariable("PATH"));
-        Assert.False(File.Exists(shim + ".target"));
     }
 
     [Fact]

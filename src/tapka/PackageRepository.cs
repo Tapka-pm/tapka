@@ -64,9 +64,9 @@ internal sealed class PackageRepository(HttpClient http, string source)
             var install = target.GetProperty("install");
             var hasScript = install.TryGetProperty("script", out _);
             var hasArchive = install.TryGetProperty("archive", out _);
-            if (RequiredString(install, "type") != "portable" || hasScript == hasArchive)
+            if (RequiredString(install, "type") != "portable" || (!hasScript && !hasArchive))
             {
-                throw new InvalidDataException("The recipe must specify either a portable PowerShell script or an archive.");
+                throw new InvalidDataException("A portable recipe must specify an archive, a PowerShell script, or both.");
             }
 
             var script = hasScript ? RelativePath(RequiredString(install, "script")) : null;
@@ -142,17 +142,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
 
     private static (string Version, JsonElement Release) ResolveVersion(JsonElement config, string requestedVersion)
     {
-        if (!config.TryGetProperty("versions", out var versions))
-        {
-            var current = RequiredString(config, "version");
-            if (requestedVersion != "latest" && requestedVersion != current)
-            {
-                throw new InvalidDataException($"Version or alias '{requestedVersion}' was not found.");
-            }
-
-            return (current, config);
-        }
-
+        var versions = config.GetProperty("versions");
         var visited = new HashSet<string>(StringComparer.Ordinal);
         var version = requestedVersion;
         while (visited.Add(version))

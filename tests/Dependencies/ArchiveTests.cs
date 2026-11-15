@@ -72,12 +72,16 @@ internal static class ArchiveTests
                 install = new { type = "portable", archive },
                 commands = command is null ? new Dictionary<string, string>() : new() { ["archive-test"] = command }
             };
-            var config = new
+            var versions = new Dictionary<string, object>
             {
-                id, version, dependencies = Array.Empty<string>(),
-                architectures = new Dictionary<string, object> { [arch] = target }
+                ["latest"] = new { type = "alias", to = version },
+                [version] = new
+                {
+                    type = "package", dependencies = Array.Empty<string>(),
+                    architectures = new Dictionary<string, object> { [arch] = target }
+                }
             };
-            File.WriteAllText(Config(id), JsonSerializer.Serialize(config));
+            File.WriteAllText(Config(id), JsonSerializer.Serialize(new { id, versions }));
         }
 
         using var zip = new MemoryStream();
@@ -177,6 +181,7 @@ internal static class ArchiveTests
         await RunChecked(sevenZip, fixtures, "a", "-bso0", "-bsp0", "-txz", "data.xz", "data.tar");
         var seven = File.ReadAllBytes(Path.Combine(fixtures, "plain.7z"));
         Recipe("seven", "7z", seven, command: command);
+        Recipe("seven-tail", "7z", [.. seven, .. "trailing data"u8]);
         Recipe("encrypted", "7z", File.ReadAllBytes(Path.Combine(fixtures, "encrypted.7z")));
         Recipe("tar-xz", "tar.xz", File.ReadAllBytes(Path.Combine(fixtures, "data.xz")));
         // Stored RAR4 and RAR5 archives with the same check.txt. The third has the volume flag set.
@@ -204,6 +209,8 @@ internal static class ArchiveTests
             Check(!File.Exists(Public(exe)), $"Automatic installation exposed {exe}.");
         }
         Check(!Directory.Exists(Path.Combine(installRoot, "shims", "deps", "seven")), "Archive tools became runtime dependencies.");
+        await Install("seven-tail");
+        Check(File.ReadAllText(Package("seven-tail", FileName)) == Text, "Wrong 7z output for an archive with trailing data.");
         var userPath = File.ReadAllText(Path.Combine(installRoot, "user-path.txt"));
         Check(userPath == Path.GetDirectoryName(Public("archive-test.exe")), "Unexpected PATH registration.");
 

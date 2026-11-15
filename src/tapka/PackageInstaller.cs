@@ -160,7 +160,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     private static string? ReadSelector(string destination)
     {
         var path = Path.Combine(destination, InstallSelector);
-        return File.Exists(path) ? File.ReadAllText(path) : null;
+        return File.Exists(Path.Combine(destination, ManifestFile)) && File.Exists(path) ? File.ReadAllText(path) : null;
     }
 
     private static Dictionary<string, PackageManifest> ReadManifests(string packages)
@@ -193,7 +193,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     {
         var destination = Path.Combine(packages, release.Id);
         var marker = Path.Combine(destination, InstallMarker);
-        return File.Exists(marker) && File.ReadAllText(marker) == release.Version &&
+        return File.Exists(Path.Combine(destination, ManifestFile)) &&
+            File.Exists(marker) && File.ReadAllText(marker) == release.Version &&
             release.Commands.Values.All(command => File.Exists(Path.Combine(destination, command))) &&
             PackageArchive.HasToolFiles(destination, release.Id, release.Commands);
     }
@@ -233,7 +234,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         {
             await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, cancellationToken);
         }
-        else
+        if (release.Script is not null)
         {
             var script = Path.Combine(staging, "install.ps1");
             await File.WriteAllBytesAsync(script, await repository.ReadScriptAsync(release, cancellationToken), cancellationToken);

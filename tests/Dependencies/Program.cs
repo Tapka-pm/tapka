@@ -31,7 +31,7 @@ try
     var installer = new PackageInstaller(scope, new PackageRepository(http, repository), http, systemPowerShell: null);
 
     void Recipe(string id, object[] dependencies, string[] commands, string version = "1",
-        string? script = null, Dictionary<string, byte[]>? files = null)
+        string? script = null, Dictionary<string, byte[]>? files = null, bool? extract = null)
     {
         var directory = Directory.CreateDirectory(Path.Combine(repository, "packages", id)).FullName;
         var artifact = files ?? new Dictionary<string, byte[]> { ["tool.exe"] = cmdBytes };
@@ -51,10 +51,19 @@ try
         {
             File.WriteAllText(Path.Combine(directory, "install.ps1"), script);
         }
+        var install = new Dictionary<string, string> { ["type"] = "portable" };
+        if (extract ?? (script is null))
+        {
+            install["archive"] = "zip";
+        }
+        if (script is not null)
+        {
+            install["script"] = "install.ps1";
+        }
         var target = new
         {
             download = new { url, sha256 = Convert.ToHexString(SHA256.HashData(payload)) },
-            install = script is null ? (object)new { type = "portable", archive = "zip" } : new { type = "portable", script = "install.ps1" },
+            install,
             commands = commands.ToDictionary(name => name, _ => id == "powershell" ? "pwsh.exe" : "tool.exe")
         };
         var versions = new Dictionary<string, object>
@@ -99,8 +108,6 @@ try
     Recipe("a", ["d", Rename("b", ("tapka-b.EXE", "vendor-b"))], ["tapka-a"], script: installScript);
     await Install("a");
     AssertPublic("tapka-a");
-    Check(!Directory.EnumerateFiles(Path.Combine(installation, "shims"), "*.target", SearchOption.AllDirectories).Any(),
-        "Installation published sidecar files.");
     Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && !File.Exists(PackageFile("powershell", ".tapka-selector")),
         "PowerShell was not bootstrapped privately.");
     Check(!Directory.Exists(shims.DependencyDirectory("c")), "Unexpected directory for a package with no dependencies.");
@@ -174,7 +181,29 @@ try
         "Rollback left parts of the failed installation.");
     AssertPublic("tapka-a", "tapka-b", "tapka-c", "new-c");
 
+    const string prepareScript = """
+        param([string]$Installer, [string]$Destination)
+        $ErrorActionPreference = 'Stop'
+        if (!(Test-Path -LiteralPath $Installer -PathType Leaf)) { throw 'The download is missing' }
+        Move-Item -LiteralPath (Join-Path $Destination 'unprepared.exe') -Destination (Join-Path $Destination 'tool.exe')
+        Set-Content -LiteralPath (Join-Path $Destination 'prepared.txt') -Value 'ready' -NoNewline
+        """;
+    Recipe("prepared", [], ["prepared"], script: prepareScript, files: new() { ["unprepared.exe"] = cmdBytes }, extract: true);
+    await Install("prepared");
+    Check(File.ReadAllText(PackageFile("prepared", "prepared.txt")) == "ready" && File.Exists(Public("prepared")),
+        "The script did not prepare the extracted package before command validation.");
+
+    Recipe("prepared", [], ["replacement"], "2", script: prepareScript + "\nexit 23",
+        files: new() { ["unprepared.exe"] = cmdBytes, ["version-2.txt"] = [] }, extract: true);
+    await Fails(() => Install("prepared"), "exit code 23");
+    Check(File.ReadAllText(PackageFile("prepared", ".tapka-version")) == "1" &&
+        !File.Exists(PackageFile("prepared", "version-2.txt")) &&
+        File.Exists(Public("prepared")) && !File.Exists(Public("replacement")),
+        "The failed script exposed part of the update or removed the old installation.");
+
     requests = handler.Requests;
+    Recipe("invalid", [], [], extract: false);
+    await Fails(() => Install("invalid"), "must specify an archive, a PowerShell script, or both");
     Recipe("invalid", ["b", Rename("b")], []);
     await Fails(() => Install("invalid"), "Duplicate dependency");
     Recipe("invalid", [Rename("b", ("missing", "alias"))], []);

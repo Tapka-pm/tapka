@@ -7,7 +7,7 @@ namespace Tapka;
 internal sealed record PackageDependency(string Id, Dictionary<string, string> Rename);
 
 internal sealed record PackageRelease(string Id, string Version, PackageDependency[] Dependencies,
-    Uri DownloadUrl, string Checksum, string? Script, Dictionary<string, string> Commands);
+    Uri DownloadUrl, string Checksum, string? Script, ArchiveFormat? Archive, Dictionary<string, string> Commands);
 
 internal sealed class PackageRepository(HttpClient http, string source)
 {
@@ -64,13 +64,13 @@ internal sealed class PackageRepository(HttpClient http, string source)
             var install = target.GetProperty("install");
             var hasScript = install.TryGetProperty("script", out _);
             var hasArchive = install.TryGetProperty("archive", out _);
-            if (RequiredString(install, "type") != "portable" || hasScript == hasArchive ||
-                (hasArchive && RequiredString(install, "archive") != "zip"))
+            if (RequiredString(install, "type") != "portable" || hasScript == hasArchive)
             {
-                throw new InvalidDataException("The recipe must specify a portable PowerShell script or ZIP archive.");
+                throw new InvalidDataException("The recipe must specify either a portable PowerShell script or an archive.");
             }
 
             var script = hasScript ? RelativePath(RequiredString(install, "script")) : null;
+            ArchiveFormat? archive = hasArchive ? PackageArchive.Parse(RequiredString(install, "archive")) : null;
             if (script is not null && !script.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("The installation script must use the .ps1 extension.");
@@ -86,7 +86,7 @@ internal sealed class PackageRepository(HttpClient http, string source)
             }
 
             var dependencies = ReadDependencies(release.GetProperty("dependencies"));
-            return new PackageRelease(id, version, dependencies, url, checksum, script, commands);
+            return new PackageRelease(id, version, dependencies, url, checksum, script, archive, commands);
         }
         catch (Exception error) when (error is JsonException or InvalidDataException
             or KeyNotFoundException or InvalidOperationException)
@@ -250,6 +250,6 @@ internal sealed class PackageRepository(HttpClient http, string source)
         return normalized;
     }
 
-    private static bool IsPathSegment(string part) => part.Length > 0 && !part.EndsWith('.') && !part.EndsWith(' ') &&
+    internal static bool IsPathSegment(string part) => part.Length > 0 && !part.EndsWith('.') && !part.EndsWith(' ') &&
         !DeviceName.IsMatch(part) && part.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
 }

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -43,7 +42,17 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 await ResolveAsync(dependency.Id);
             }
 
-            if (release.Script is not null && !IsInstalled(packages, release) && powerShell is null &&
+            var needsInstallation = !IsInstalled(packages, release);
+            if (needsInstallation && PackageArchive.Needs7Zip(release.Archive))
+            {
+                await ResolveAsync(PackageArchive.ExtractorPackage);
+            }
+            if (needsInstallation && PackageArchive.NeedsBootstrap(release))
+            {
+                await ResolveAsync(PackageArchive.BootstrapPackage);
+            }
+
+            if (needsInstallation && release.Script is not null && powerShell is null &&
                 !plan.Any(candidate => candidate.Id == "powershell" && candidate.Commands.ContainsKey("pwsh.exe")))
             {
                 if (visiting.Contains("powershell"))
@@ -102,8 +111,17 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             }
             else
             {
+                var bootstrap = PackageArchive.NeedsBootstrap(release)
+                    ? PackageArchive.GetTool(packages, PackageArchive.BootstrapPackage,
+                        manifests[PackageArchive.BootstrapPackage].Commands)
+                    : null;
+                var extractor = PackageArchive.Needs7Zip(release.Archive)
+                    ? PackageArchive.GetTool(packages, PackageArchive.ExtractorPackage,
+                        manifests[PackageArchive.ExtractorPackage].Commands)
+                    : null;
                 var staged = await StagePackageAsync(release, transaction.CreateStagingDirectory(release.Id),
-                    commands.Count == 0 ? null : dependencies, powerShell, selector, manifest, cancellationToken);
+                    commands.Count == 0 ? null : dependencies, powerShell, bootstrap, extractor, selector,
+                    manifest, cancellationToken);
                 transaction.PublishPackage(staged, destination);
             }
 
@@ -176,7 +194,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         var destination = Path.Combine(packages, release.Id);
         var marker = Path.Combine(destination, InstallMarker);
         return File.Exists(marker) && File.ReadAllText(marker) == release.Version &&
-            release.Commands.Values.All(command => File.Exists(Path.Combine(destination, command)));
+            release.Commands.Values.All(command => File.Exists(Path.Combine(destination, command))) &&
+            PackageArchive.HasToolFiles(destination, release.Id, release.Commands);
     }
 
     private async Task<FileStream> AcquireLockAsync(CancellationToken cancellationToken)
@@ -203,22 +222,23 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     }
 
     private async Task<string> StagePackageAsync(PackageRelease release, string staging, string? dependencies,
-        string? powerShell, string? selector, byte[] manifest, CancellationToken cancellationToken)
+        string? powerShell, string? bootstrap, string? extractor, string? selector, byte[] manifest,
+        CancellationToken cancellationToken)
     {
         var installerDirectory = Directory.CreateDirectory(Path.Combine(staging, "download")).FullName;
         var installer = Path.Combine(installerDirectory, PackageRepository.GetDownloadFilename(release.DownloadUrl));
         var stagedPackage = Directory.CreateDirectory(Path.Combine(staging, "package")).FullName;
         await DownloadAsync(release, installer, cancellationToken);
-        if (release.Script is null)
+        if (release.Archive is { } archive)
         {
-            ZipFile.ExtractToDirectory(installer, stagedPackage);
+            await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, cancellationToken);
         }
         else
         {
             var script = Path.Combine(staging, "install.ps1");
             await File.WriteAllBytesAsync(script, await repository.ReadScriptAsync(release, cancellationToken), cancellationToken);
             await RunScriptAsync(powerShell ?? throw new IOException("An existing PowerShell 7 installation is required."),
-                script, installer, stagedPackage, dependencies, cancellationToken);
+                script, installer, stagedPackage, dependencies, bootstrap, cancellationToken);
         }
 
         foreach (var (command, target) in release.Commands)
@@ -227,6 +247,11 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             {
                 throw new IOException($"Package '{release.Id}' did not provide '{target}' for '{command}'.");
             }
+        }
+
+        if (!PackageArchive.HasToolFiles(stagedPackage, release.Id, release.Commands))
+        {
+            throw new IOException($"Package '{release.Id}' did not provide the required extractor files.");
         }
 
         await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallMarker), release.Version, cancellationToken);
@@ -303,13 +328,11 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         return programFiles.Length > 0 && File.Exists(standardLocation) ? standardLocation : null;
     }
 
-    private static async Task RunScriptAsync(string powerShell, string script, string installer, string destination,
-        string? dependencies, CancellationToken cancellationToken)
+    private static Task RunScriptAsync(string powerShell, string script, string installer, string destination,
+        string? dependencies, string? bootstrap, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo(powerShell)
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(script)!
         };
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
@@ -318,38 +341,19 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             start.ArgumentList.Add(argument);
         }
 
+        if (bootstrap is not null)
+        {
+            // PowerShell may prepend its own directory to PATH during startup.
+            start.Environment["TAPKA_7ZR"] = bootstrap;
+            var directory = Path.GetDirectoryName(bootstrap)!;
+            dependencies = dependencies is null ? directory : $"{directory};{dependencies}";
+        }
         if (dependencies is not null)
         {
             var inheritedPath = Environment.GetEnvironmentVariable("PATH");
             start.Environment["PATH"] = string.IsNullOrEmpty(inheritedPath) ? dependencies : $"{dependencies};{inheritedPath}";
         }
 
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromMinutes(5));
-        using var process = Process.Start(start) ?? throw new IOException("Could not start PowerShell.");
-        try
-        {
-            await process.WaitForExitAsync(deadline.Token);
-        }
-        catch (OperationCanceledException error)
-        {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync(CancellationToken.None);
-            }
-            catch (InvalidOperationException)
-            {
-                // PowerShell already exited.
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            throw new IOException("The PowerShell installation script timed out.", error);
-        }
-
-        if (process.ExitCode != 0)
-        {
-            throw new IOException($"The PowerShell installation script failed (exit code {process.ExitCode}).");
-        }
+        return InstallProcess.RunAsync(start, "PowerShell installation script", cancellationToken);
     }
 }

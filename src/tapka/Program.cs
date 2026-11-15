@@ -10,7 +10,9 @@ var root = new RootCommand("Portable package manager for Windows.") { install };
 
 #if TAPKA_TEST_BUILD
 var testRoot = new Option<string>("--root") { Description = "Absolute test installation directory.", Required = true };
+var fixtureDownloads = new Option<string>("--fixture-downloads") { Description = "Directory containing local integration test downloads." };
 install.Options.Add(testRoot);
+install.Options.Add(fixtureDownloads);
 #endif
 
 install.SetAction(async (parseResult, cancellationToken) =>
@@ -39,12 +41,16 @@ install.SetAction(async (parseResult, cancellationToken) =>
 
 #if TAPKA_TEST_BUILD
         var scope = InstallScope.Create(parseResult.GetValue(testRoot));
+        var fixtures = parseResult.GetValue(fixtureDownloads);
+        using var http = fixtures is null ? new HttpClient() : new HttpClient(new TestDownloads(fixtures));
+        var powerShell = fixtures is null ? PackageInstaller.FindSystemPowerShell() : null;
 #else
         var scope = InstallScope.Create();
-#endif
         using var http = new HttpClient();
+        var powerShell = PackageInstaller.FindSystemPowerShell();
+#endif
         var repository = new PackageRepository(http, parseResult.GetValue(source) ?? PackageRepository.DefaultSource);
-        var installer = new PackageInstaller(scope, repository, http, PackageInstaller.FindSystemPowerShell());
+        var installer = new PackageInstaller(scope, repository, http, powerShell);
         await installer.InstallAsync(packageReference[0].ToLowerInvariant(), requestedVersion, architecture, cancellationToken);
         return 0;
     }

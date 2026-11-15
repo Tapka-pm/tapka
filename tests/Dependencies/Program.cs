@@ -5,6 +5,17 @@ using System.Text.Json;
 using Tapka;
 
 var powerShell = PackageInstaller.FindSystemPowerShell() ?? throw new Exception("PowerShell 7 is required.");
+var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
+if (args is ["--archives", .. var archiveArgs])
+{
+    await ArchiveTests.RunAsync(arch, powerShell, archiveArgs);
+    return;
+}
+if (args.Length != 0)
+{
+    throw new ArgumentException("Use test-archives.ps1 to run the archive integration tests.");
+}
+
 var root = Directory.CreateTempSubdirectory("tapka dependency tests ").FullName;
 var userPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User);
 try
@@ -13,7 +24,6 @@ try
     var repository = Path.Combine(root, "catalog");
     var shims = new PackageShims(installation);
     var scope = InstallScope.Create(installation);
-    var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
     var cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
     var cmdBytes = File.ReadAllBytes(cmd);
     var handler = new FixtureDownloads();

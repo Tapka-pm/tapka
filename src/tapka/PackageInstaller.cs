@@ -11,7 +11,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     private const string InstallSelector = ".tapka-selector";
     private const string ManifestFile = ".tapka-package.json";
 
-    public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken)
+    public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken,
+        bool verifyTapka = false)
     {
         Directory.CreateDirectory(scope.Root);
         using var installLock = await AcquireLockAsync(cancellationToken);
@@ -96,7 +97,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             cancellationToken.ThrowIfCancellationRequested();
             var destination = Path.Combine(packages, release.Id);
             var selector = release.Id == id ? version : ReadSelector(destination);
-            var manifest = JsonSerializer.SerializeToUtf8Bytes(manifests[release.Id]);
+            var manifest = JsonSerializer.SerializeToUtf8Bytes(manifests[release.Id], PackageJsonContext.Default.PackageManifest);
             var dependencies = shims.DependencyDirectory(release.Id);
             var commands = dependencyCommands[release.Id];
             shims.Sync(dependencies, commands, dependencyCommands, transaction);
@@ -143,6 +144,14 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             }
         }
         shims.Sync(shims.PublicDirectory, publicCommands, dependencyCommands, transaction);
+        if (verifyTapka)
+        {
+            var start = new ProcessStartInfo(Path.Combine(shims.PublicDirectory, "tapka.exe"));
+            start.ArgumentList.Add("--help");
+            await InstallProcess.RunAsync(start, "installed tapka", cancellationToken,
+                async (process, token) => { await process.StandardOutput.ReadToEndAsync(token); },
+                TimeSpan.FromSeconds(30));
+        }
         cancellationToken.ThrowIfCancellationRequested();
         List<string> warnings = publicCommands.Count == 0 ? [] : scope.RegisterShims(shims.PublicDirectory,
             plan.Where(release => explicitIds.Contains(release.Id)).SelectMany(release => release.Commands.Keys), transaction);
@@ -175,7 +184,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             }
             try
             {
-                var manifest = JsonSerializer.Deserialize<PackageManifest>(File.ReadAllBytes(path)) ?? throw new JsonException();
+                var manifest = JsonSerializer.Deserialize(File.ReadAllBytes(path), PackageJsonContext.Default.PackageManifest)
+                    ?? throw new JsonException();
                 var dependencies = manifest.Dependencies.Select(dependency => new PackageDependency(dependency.Id,
                     new Dictionary<string, string>(dependency.Rename, StringComparer.OrdinalIgnoreCase))).ToArray();
                 manifests.Add(Path.GetFileName(directory), new PackageManifest(dependencies,

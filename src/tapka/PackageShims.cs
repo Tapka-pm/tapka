@@ -1,7 +1,7 @@
 namespace Tapka;
 
 internal sealed record PackageManifest(PackageDependency[] Dependencies, Dictionary<string, string> Commands);
-internal sealed record ShimTarget(string Package, string Executable);
+internal sealed record ShimTarget(string Package, string Executable, string DotNetRoot);
 
 internal sealed class PackageShims(string root)
 {
@@ -25,7 +25,7 @@ internal sealed class PackageShims(string root)
         {
             foreach (var (name, executable) in packages[id].Commands)
             {
-                AddCommand(commands, name, new ShimTarget(id, executable), "the public PATH");
+                AddCommand(commands, name, GetTarget(packages, id, executable), "the public PATH");
             }
         }
         return commands;
@@ -68,7 +68,7 @@ internal sealed class PackageShims(string root)
             foreach (var (original, executable) in package.Commands)
             {
                 var name = rename?.GetValueOrDefault(original) ?? original;
-                AddCommand(commands, name, new ShimTarget(id, executable), $"dependencies of '{consumer}'");
+                AddCommand(commands, name, GetTarget(packages, id, executable), $"dependencies of '{consumer}'");
             }
 
             visiting.Add(id);
@@ -110,7 +110,7 @@ internal sealed class PackageShims(string root)
                 var executable = Path.Combine(directory, command);
                 var targetPath = Path.Combine("packages", target.Package, target.Executable);
                 var prefix = dependencyCommands[target.Package].Count == 0 ? "" : Path.Combine("shims", "deps", target.Package);
-                transaction.WriteFile(executable, ShimBinary.Create(shim.Value, rootRelative, targetPath, prefix));
+                transaction.WriteFile(executable, ShimBinary.Create(shim.Value, rootRelative, targetPath, prefix, target.DotNetRoot));
             }
         }
 
@@ -126,6 +126,22 @@ internal sealed class PackageShims(string root)
             }
         }
         transaction.RemoveEmptyDirectory(directory);
+    }
+
+    private static ShimTarget GetTarget(IReadOnlyDictionary<string, PackageManifest> packages, string id, string executable)
+    {
+        const string runtime = "dotnet-runtime-11";
+        if (id == "tapka" && packages[id].Dependencies.Any(dependency => dependency.Id == runtime))
+        {
+            if (!packages.TryGetValue(runtime, out var manifest) ||
+                !manifest.Commands.TryGetValue("dotnet.exe", out var host))
+            {
+                throw new IOException("The .NET runtime package must provide 'dotnet.exe' to run tapka.");
+            }
+            return new ShimTarget(id, executable, Path.Combine("packages", runtime, Path.GetDirectoryName(host)!));
+        }
+
+        return new ShimTarget(id, executable, "");
     }
 
     private static void AddCommand(Dictionary<string, ShimTarget> commands, string name, ShimTarget target, string scope)

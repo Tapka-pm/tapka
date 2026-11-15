@@ -11,7 +11,8 @@ static const volatile struct {
     wchar_t root_relative[WINDOWS_PATH_CAPACITY];
     wchar_t target_exe[WINDOWS_PATH_CAPACITY];
     wchar_t path_prefix[WINDOWS_PATH_CAPACITY];
-} config = { .marker = "TAPKA_SHIM_CONFIG_V1:0e94b57a3d" };
+    wchar_t dotnet_root[WINDOWS_PATH_CAPACITY];
+} config = { .marker = "TAPKA_SHIM_CONFIG_V2:0e94b57a3d" };
 
 static int print_windows_error(const wchar_t *message)
 {
@@ -124,9 +125,11 @@ int wmain(void)
     static wchar_t root_relative[WINDOWS_PATH_CAPACITY];
     static wchar_t target_relative[WINDOWS_PATH_CAPACITY];
     static wchar_t prefix_relative[WINDOWS_PATH_CAPACITY];
+    static wchar_t dotnet_relative[WINDOWS_PATH_CAPACITY];
     if (!copy_setting(root_relative, config.root_relative, FALSE) ||
         !copy_setting(target_relative, config.target_exe, FALSE) ||
-        !copy_setting(prefix_relative, config.path_prefix, TRUE)) {
+        !copy_setting(prefix_relative, config.path_prefix, TRUE) ||
+        !copy_setting(dotnet_relative, config.dotnet_root, TRUE)) {
         fwprintf(stderr, L"tapka: invalid embedded shim settings.\n");
         return 1;
     }
@@ -147,6 +150,14 @@ int wmain(void)
         }
         if (!prepend_dependencies(prefix)) {
             return print_windows_error(L"cannot set the package dependency PATH");
+        }
+    }
+    if (*dotnet_relative != L'\0') {
+        static wchar_t dotnet[WINDOWS_PATH_CAPACITY];
+        if (!resolve_path(root, dotnet_relative, dotnet) ||
+            !SetEnvironmentVariableW(L"DOTNET_ROOT", dotnet) ||
+            !SetEnvironmentVariableW(L"DOTNET_ROOT_X64", dotnet)) {
+            return print_windows_error(L"cannot set the private .NET runtime path");
         }
     }
 

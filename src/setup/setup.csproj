@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>tapka-setup-win-x64</AssemblyName>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <ILLinkTreatWarningsAsErrors>true</ILLinkTreatWarningsAsErrors>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefineConstants Condition="'$(TapkaTestBuild)' == 'true'">$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="3.0.0" />
+    <Compile Include="../tapka/*.cs" Exclude="../tapka/Program.cs" />
+    <AssemblyMetadata Include="TapkaVersion" Value="$(Version)" />
+    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" />
+  </ItemGroup>
+  <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">
+    <Error Text="Run build.ps1 to compile and embed the native command shim." />
+  </Target>
+</Project>

@@ -2,23 +2,50 @@
 
 Менеджер переносимых пакетов для Windows на .NET 11. Tapka читает рецепты `packages/<id>/config.json` из официального каталога. Установленные пакеты хранятся в `%LOCALAPPDATA%\tapka\packages`, а команды явно установленных пакетов доступны в PATH через shim-файлы в `%LOCALAPPDATA%\tapka\shims\public`. [Каталог Tapka](https://github.com/Tapka-pm/packages)
 
+## Установка tapka
+
+В Windows PowerShell или PowerShell 7 выполните:
+
+```powershell
+irm https://raw.githubusercontent.com/Tapka-pm/tapka/main/install.ps1 | iex
+```
+
+В CMD выполните:
+
+```cmd
+powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/Tapka-pm/tapka/main/install.ps1 | iex" && for %I in (tapka.exe) do @if /i not "%~$PATH:I"=="%LOCALAPPDATA%\tapka\shims\public\tapka.exe" set "PATH=%LOCALAPPDATA%\tapka\shims\public;%PATH%"
+```
+
+Сразу после установки выполните `tapka --help` в том же терминале. Нужны Windows x64 и интернет. Установщик работает от текущего пользователя и ставит переносимые .NET 11 и PowerShell 7 в дерево Tapka.
+
+Можно также скачать `tapka-setup-win-x64.exe` из [последнего релиза](https://github.com/Tapka-pm/tapka/releases/latest) и открыть его двойным щелчком. После этого запустите новый терминал.
+
 ## Сборка
 
 Для сборки нужны .NET 11 SDK и Visual Studio Build Tools с рабочей нагрузкой «Разработка классических приложений на C++» (MSVC x64 и Windows SDK). Скрипт ищет .NET SDK в `artifacts\tools` и `PATH`; параметр `-DotNet` принимает путь к `dotnet.exe`. Для компилятора shim сначала используется `cl.exe` из `PATH`, затем поиск через `vswhere.exe` и инициализация MSVC x64 через `vcvarsall.bat`. [.NET 11 SDK](https://dotnet.microsoft.com/download/dotnet/11.0), [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
 | Команда | Результат |
 | --- | --- |
-| `.\build.ps1` | `artifacts\release\tapka.exe` |
+| `.\build.ps1 -Version 0.1.0` | `artifacts\release\tapka-win-x64.zip` и `artifacts\release\tapka-setup-win-x64.exe` |
 | `.\build.ps1 -Test` | `artifacts\test\tapka.exe` |
+| `.\build.ps1 -Test -Target Setup -Version 0.1.0` | `artifacts\test\tapka-setup-win-x64.exe` |
 
-Скрипт собирает x64-клиент со встроенной средой выполнения .NET. Клиент выбирает `x64` или `arm64` в рецепте по архитектуре Windows. Общий проект MSBuild собирает нативный шаблон shim в `artifacts\build\shim\Release\x64\shim.exe` для клиента и тестов.
+Клиент в релизном ZIP использует .NET из приватной зависимости `dotnet-runtime-11`. При запуске tapka её shim передаёт путь к runtime через `DOTNET_ROOT` и `DOTNET_ROOT_X64`. Тестовый клиент содержит собственную среду выполнения, чтобы его можно было запустить напрямую. Общий проект MSBuild собирает нативный шаблон shim в `artifacts\build\shim\Release\x64\shim.exe`.
+
+## Публикация
+
+Push стабильного тега формата `vX.Y.Z` запускает workflow Release tapka. Первый выпуск — `v0.1.0`. До push тега загрузите изменения ветки `main` и подготовьте изменения каталога в ветке `master` репозитория `Tapka-pm/packages`. Настройте в GitHub Actions secret `PACKAGES_TOKEN` с правом Contents: read and write только для репозитория каталога. У токена должен быть доступ к записи в `master`.
+
+Workflow собирает и тестирует оба файла, загружает их в черновик GitHub Release и добавляет точный URL и SHA-256 клиентского ZIP в каталог. Затем он публикует Release и обновляет алиас `latest`, если этот выпуск новее. При сбое перезапустите workflow того же тега. Уже загруженные файлы сохраняются.
+
+Установщик из каждого релиза запрашивает версию своего тега. Каталог сохраняет выпущенные версии tapka, чтобы старые установщики продолжали работать.
 
 ## Установка пакетов
 
 ```powershell
-.\artifacts\release\tapka.exe install git
-.\artifacts\release\tapka.exe install dotnet-runtime@lts
-.\artifacts\release\tapka.exe install powershell
+tapka install git
+tapka install dotnet-runtime@lts
+tapka install powershell
 ```
 
 `install` принимает имя пакета, `имя@версия` или `имя@алиас`. В `versions` рецепт перечисляет актуальные релизы поддерживаемых линеек и их алиасы, например `lts` и `sts`. Без суффикса используется `latest`. Для явно запрошенного пакета Tapka сохраняет выбранный селектор в `.tapka-selector`, а установленный номер версии в `.tapka-version`. Повторный вызов с тем же алиасом берёт его актуальную цель из рецепта. Предыдущие релизы доступны в истории Git.
@@ -47,7 +74,7 @@ Tapka устанавливает зависимости первыми и про
 Параметр `--repository` принимает базовый HTTPS URL каталога или путь к локальному клону. Для соседнего каталога `packages` выполните из папки клиента:
 
 ```powershell
-.\artifacts\release\tapka.exe install git --repository ..\packages
+tapka install git --repository ..\packages
 ```
 
 Даже при использовании локального каталога Tapka скачивает дистрибутив по HTTPS из URL в рецепте. Используйте каталоги, которым доверяете, поскольку их рецепты могут запускать скрипты установки.
@@ -73,3 +100,5 @@ git --version
 Для полного прогона скрипт скачивает недостающие дистрибутивы `7zr`, `7zip` и `powershell` для архитектуры Windows в `artifacts\archive-upstream` и сверяет SHA-256 по рецептам. Ключ `-Offline` запускает все сценарии из кеша, а `-BuiltInOnly` проверяет ZIP, TAR и TAR.GZ без этих дистрибутивов. Параметры `-Repository` и `-Assets` позволяют указать другой каталог рецептов или кеш. Сам тестовый клиент получает файлы локально и пишет PATH только в тестовый корень.
 
 Из каталога клиента запустите `dotnet test tests/Shim.Tests`, чтобы проверить генерацию бинарника, запуск команд, окружение и перенос дерева. Проект автоматически собирает оптимизированный shim и тестовый exe через MSVC. При первой сборке тестов нужен доступ к NuGet.
+
+`.\test-setup.ps1` проверяет AOT-установщик из `artifacts\test` с клиентским релизным ZIP. Используйте одну и ту же версию при сборке ZIP и установщика. Тест устанавливает обе зависимости и клиент в изолированный каталог, запускает публичный shim и проверяет повторную установку и откат при неверном хеше.

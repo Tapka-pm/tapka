@@ -1,0 +1,57 @@
+name: Release tapka
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+concurrency:
+  group: tapka-release
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - name: Check release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -cnotmatch '\Av((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\z') {
+              throw 'Release tags must use vX.Y.Z.'
+          }
+          "TAPKA_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: Tapka-pm/packages
+          ref: master
+          path: catalog
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '11.0.100'
+      - name: Build release
+        shell: pwsh
+        run: ./build.ps1 -Version $env:TAPKA_VERSION
+      - name: Verify installation
+        shell: pwsh
+        run: |
+          dotnet test tests/Shim.Tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./build.ps1 -Test -Target All -Version $env:TAPKA_VERSION
+          dotnet run --project tests/Dependencies
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./test-setup.ps1 -Version $env:TAPKA_VERSION -Repository ./catalog
+      - name: Publish release and recipe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: ./.github/scripts/release.ps1 -Tag $env:GITHUB_REF_NAME

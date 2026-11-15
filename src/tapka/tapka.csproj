@@ -4,8 +4,9 @@
     <TargetFramework>net11.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishSingleFile Condition="'$(TapkaTestBuild)' == 'true'">true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract Condition="'$(TapkaTestBuild)' == 'true'">true</IncludeNativeLibrariesForSelfExtract>
+    <AppHostDotNetSearch Condition="'$(TapkaTestBuild)' != 'true'">EnvironmentVariable</AppHostDotNetSearch>
     <DebugType>embedded</DebugType>
     <DefineConstants Condition="'$(TapkaTestBuild)' == 'true'">$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
   </PropertyGroup>

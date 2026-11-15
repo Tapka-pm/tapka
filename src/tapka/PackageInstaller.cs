@@ -90,7 +90,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             var manifest = JsonSerializer.SerializeToUtf8Bytes(manifests[release.Id]);
             var dependencies = shims.DependencyDirectory(release.Id);
             var commands = dependencyCommands[release.Id];
-            shims.Sync(dependencies, commands, transaction);
+            shims.Sync(dependencies, commands, dependencyCommands, transaction);
             var installed = IsInstalled(packages, release);
             if (installed)
             {
@@ -121,10 +121,10 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         {
             if (!resolved.Contains(package))
             {
-                shims.Sync(shims.DependencyDirectory(package), commands, transaction);
+                shims.Sync(shims.DependencyDirectory(package), commands, dependencyCommands, transaction);
             }
         }
-        shims.Sync(shims.PublicDirectory, publicCommands, transaction);
+        shims.Sync(shims.PublicDirectory, publicCommands, dependencyCommands, transaction);
         cancellationToken.ThrowIfCancellationRequested();
         List<string> warnings = publicCommands.Count == 0 ? [] : scope.RegisterShims(shims.PublicDirectory,
             plan.Where(release => explicitIds.Contains(release.Id)).SelectMany(release => release.Commands.Keys), transaction);

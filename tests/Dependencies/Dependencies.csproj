@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <DefineConstants>$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
-    <ShimPath>../../artifacts/build/test/shim.exe</ShimPath>
+    <ShimPath>../../artifacts/build/shim/Release/x64/shim.exe</ShimPath>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/tapka/*.cs" Exclude="../../src/tapka/Program.cs" />

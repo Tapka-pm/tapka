@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <ShimProject>../../src/shim/shim.proj</ShimProject>
+    <ShimOutput>../../artifacts/build/shim/Release/x64</ShimOutput>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
+    <Using Include="Xunit" />
+    <Compile Include="../../src/tapka/ShimBinary.cs" Link="ShimBinary.cs" />
+    <None Include="$(ShimOutput)/shim.exe" Link="shim.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(ShimOutput)/shim-probe.exe" Link="shim-probe.exe" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="BuildNativeFixtures" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="$(ShimProject)" Targets="Build;BuildProbe" Properties="Configuration=Release;Platform=x64" />
+  </Target>
+</Project>

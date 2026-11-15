@@ -1,5 +1,3 @@
-using System.Text;
-
 namespace Tapka;
 
 internal sealed record PackageManifest(PackageDependency[] Dependencies, Dictionary<string, string> Commands);
@@ -7,7 +5,6 @@ internal sealed record ShimTarget(string Package, string Executable);
 
 internal sealed class PackageShims(string root)
 {
-    private const string TargetSuffix = ".target";
     private readonly Lazy<byte[]> shim = new(() =>
     {
         using var resource = typeof(PackageShims).Assembly.GetManifestResourceStream("tapka.shim.exe")
@@ -94,26 +91,26 @@ internal sealed class PackageShims(string root)
         foreach (var command in commands)
         {
             var path = Path.Combine(directory, command);
-            if (File.Exists(path) && !File.Exists(path + TargetSuffix))
+            if (File.Exists(path) && !ShimBinary.IsManaged(File.ReadAllBytes(path)))
             {
                 throw new IOException($"Command '{command}' conflicts with an existing executable in '{directory}'.");
             }
         }
     }
 
-    public void Sync(string directory, IReadOnlyDictionary<string, ShimTarget> commands, InstallTransaction transaction)
+    public void Sync(string directory, IReadOnlyDictionary<string, ShimTarget> commands,
+        IReadOnlyDictionary<string, Dictionary<string, ShimTarget>> dependencyCommands, InstallTransaction transaction)
     {
         if (commands.Count > 0)
         {
             transaction.EnsureDirectory(directory);
+            var rootRelative = Path.GetRelativePath(directory, root);
             foreach (var (command, target) in commands)
             {
                 var executable = Path.Combine(directory, command);
-                var targetPath = Path.Combine(root, "packages", target.Package, target.Executable);
-                // Two NUL-terminated UTF-16 strings let the same launcher work at either depth.
-                var metadata = Encoding.Unicode.GetBytes(targetPath + "\0" + DependencyDirectory(target.Package) + "\0");
-                transaction.WriteFile(executable + TargetSuffix, metadata);
-                transaction.WriteFile(executable, shim.Value);
+                var targetPath = Path.Combine("packages", target.Package, target.Executable);
+                var prefix = dependencyCommands[target.Package].Count == 0 ? "" : Path.Combine("shims", "deps", target.Package);
+                transaction.WriteFile(executable, ShimBinary.Create(shim.Value, rootRelative, targetPath, prefix));
             }
         }
 
@@ -121,12 +118,10 @@ internal sealed class PackageShims(string root)
         {
             return;
         }
-        foreach (var path in Directory.GetFiles(directory, "*.exe" + TargetSuffix))
+        foreach (var path in Directory.EnumerateFiles(directory, "*.exe"))
         {
-            var filename = Path.GetFileName(path)[..^TargetSuffix.Length];
-            if (!commands.ContainsKey(filename))
+            if (!commands.ContainsKey(Path.GetFileName(path)) && ShimBinary.IsManaged(File.ReadAllBytes(path)))
             {
-                transaction.WriteFile(Path.Combine(directory, filename), null);
                 transaction.WriteFile(path, null);
             }
         }

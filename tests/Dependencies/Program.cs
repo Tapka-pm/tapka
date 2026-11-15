@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Tapka;
 
@@ -70,12 +69,9 @@ try
             "Unexpected PATH registration.");
     }
 
-    var launcher = Path.GetFullPath(Path.Combine(shims.PublicDirectory, "unused"));
-    var launcherBytes = ReadShim();
     Recipe("powershell", [], ["pwsh"], files: new()
     {
-        ["pwsh.exe"] = launcherBytes,
-        ["pwsh.exe.target"] = Encoding.Unicode.GetBytes(powerShell + "\0" + launcher + "\0")
+        ["pwsh.exe"] = ShimBinary.Create(ReadShim(), @"..\..", Path.GetRelativePath(installation, powerShell), "")
     });
     Recipe("c", [], ["tapka-c", "old-c"]);
     Recipe("b", [Rename("c", ("TaPkA-C.ExE", "inner-c.exe"))], ["tapka-b"]);
@@ -93,6 +89,8 @@ try
     Recipe("a", ["d", Rename("b", ("tapka-b.EXE", "vendor-b"))], ["tapka-a"], script: installScript);
     await Install("a");
     AssertPublic("tapka-a");
+    Check(!Directory.EnumerateFiles(Path.Combine(installation, "shims"), "*.target", SearchOption.AllDirectories).Any(),
+        "Installation published sidecar files.");
     Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && !File.Exists(PackageFile("powershell", ".tapka-selector")),
         "PowerShell was not bootstrapped privately.");
     Check(!Directory.Exists(shims.DependencyDirectory("c")), "Unexpected directory for a package with no dependencies.");
@@ -123,19 +121,29 @@ try
         "The private launcher did not prepend B's dependency PATH.");
     Check((await Run(Public("tapka-a"), "tapka-c.exe /d /c exit 31")).ExitCode == 31, "Exit code changed.");
 
+    Recipe("foreign", [], ["foreign"]);
+    File.WriteAllBytes(Public("foreign"), cmdBytes);
+    var requests = handler.Requests;
+    await Fails(() => Install("foreign"), "conflicts with an existing executable");
+    Check(handler.Requests == requests, "The conflicting command reached the download step.");
+
     Recipe("a", ["d", Rename("b", ("tapka-b", "vendor-b")), Rename("c", ("tapka-c", "vendor-c"))], ["tapka-a"]);
     await Install("a");
+    Check(File.ReadAllBytes(Public("foreign")).SequenceEqual(cmdBytes), "Synchronization changed a foreign executable.");
+    File.Delete(Public("foreign"));
     Check(!File.Exists(Private("a", "tapka-c")) && File.Exists(Private("a", "vendor-c")),
         "Direct declaration did not override the transitive name.");
 
-    var requests = handler.Requests;
+    requests = handler.Requests;
     Directory.CreateDirectory(Public("tapka-b"));
     await Fails(() => Install("b", "1"));
     Check(!File.Exists(PackageFile("b", ".tapka-selector")), "Failed promotion left an explicit selector.");
     Directory.Delete(Public("tapka-b"));
     await Install("b", "1");
     Check(handler.Requests == requests, "Explicit install re-downloaded an already installed dependency.");
+    var shimWrittenAt = File.GetLastWriteTimeUtc(Public("tapka-b"));
     await Install("a");
+    Check(File.GetLastWriteTimeUtc(Public("tapka-b")) == shimWrittenAt, "Synchronization rewrote an unchanged shim.");
     AssertPublic("tapka-a", "tapka-b");
     Check(File.ReadAllText(PackageFile("b", ".tapka-selector")) == "1", "Explicit dependency selector was lost.");
 
@@ -152,7 +160,7 @@ try
     Check(File.ReadAllText(PackageFile("c", ".tapka-version")) == "2", "Rollback did not restore C's files.");
     Check(File.Exists(Private("a", "new-c")) && !File.Exists(Private("a", "rollback-c")),
         "Rollback did not restore A's dependency shims.");
-    Check(!Directory.Exists(PackageFile("broken", "")) && !File.Exists(Public("broken") + ".target"),
+    Check(!Directory.Exists(PackageFile("broken", "")) && !File.Exists(Public("broken")),
         "Rollback left parts of the failed installation.");
     AssertPublic("tapka-a", "tapka-b", "tapka-c", "new-c");
 

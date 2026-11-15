@@ -24,8 +24,10 @@ function Invoke-Gh {
 }
 
 function Get-Releases {
-    $pages = Invoke-Gh api --paginate --slurp "repos/$repo/releases?per_page=100" | ConvertFrom-Json -NoEnumerate
-    foreach ($page in $pages) { $page }
+    $json = (Invoke-Gh api --paginate --slurp "repos/$repo/releases?per_page=100") -join "`n"
+    foreach ($page in (ConvertFrom-Json -InputObject $json -NoEnumerate)) {
+        foreach ($release in $page) { $release }
+    }
 }
 
 function Read-CatalogFile([string] $Path) {
@@ -91,14 +93,24 @@ $catalogHeaders = @{
     Accept = 'application/vnd.github+json'
 }
 $schema = Decode-CatalogFile (Read-CatalogFile 'package-schema.json')
+# Publishing must use an existing Git tag.
+Invoke-Gh api "repos/$repo/git/ref/tags/$Tag" | Out-Null
 $releases = Get-Releases
-$release = $releases | Where-Object tag_name -CEQ $Tag | Select-Object -First 1
+$matching = @($releases | Where-Object tag_name -CEQ $Tag)
+if ($matching.Count -gt 1) { throw "More than one release matches $Tag." }
+$release = $matching | Select-Object -First 1
 if (!$release) {
-    Invoke-Gh release create $Tag --repo $repo --verify-tag --title $Tag --draft | Write-Host
-    $release = Get-Releases | Where-Object tag_name -CEQ $Tag | Select-Object -First 1
-    if (!$release) { throw "Could not find the release draft for $Tag." }
+    # Reuse the response instead of waiting for the new draft to appear in the list.
+    $release = Invoke-Gh api "repos/$repo/releases" --method POST -f "tag_name=$Tag" -f "name=$Tag" -F draft=true |
+        ConvertFrom-Json
+    if (!$release.draft -or !$release.id) { throw "GitHub did not return a release draft for $Tag." }
 }
 $releasePath = "repos/$repo/releases/$($release.id)"
+$releaseHeaders = @{
+    Authorization = "Bearer $env:GH_TOKEN"
+    Accept = 'application/vnd.github+json'
+}
+Write-Host "Using release $($release.id) for $Tag."
 $assets = $release.assets
 foreach ($name in $files) {
     $asset = $assets | Where-Object name -CEQ $name
@@ -110,7 +122,14 @@ foreach ($name in $files) {
     }
     $file = Join-Path $output $name
     if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release file: $file." }
-    Invoke-Gh release upload $Tag $file --repo $repo | Write-Host
+    $uploadUrl = $release.upload_url -replace '\{.*\}$', ''
+    if ($uploadUrl -ne "https://uploads.github.com/$releasePath/assets") {
+        throw "Unexpected upload URL for release $($release.id)."
+    }
+    Write-Host "Uploading $name..."
+    Invoke-RestMethod -Method Post -Uri "${uploadUrl}?name=$([Uri]::EscapeDataString($name))" `
+        -Headers $releaseHeaders -ContentType 'application/octet-stream' -InFile $file -TimeoutSec 120 |
+        Out-Null
 }
 $release = Invoke-Gh api $releasePath | ConvertFrom-Json
 $hashes = @{}
@@ -139,7 +158,11 @@ if ($release.draft) {
         'SHA-256'
         foreach ($name in $files) { "- $name $($hashes[$name])" }
     ) -join "`n"
-    Invoke-Gh api $releasePath --method PATCH -F draft=false -f "make_latest=$latest" -f "body=$notes" --jq '.html_url' |
-        Write-Host
+    $published = Invoke-Gh api $releasePath --method PATCH -F draft=false -f "tag_name=$Tag" -f "make_latest=$latest" -f "body=$notes" |
+        ConvertFrom-Json
+    if ($published.draft -ne $false -or $published.tag_name -cne $Tag) {
+        throw "GitHub did not publish release $($release.id) as $Tag."
+    }
+    Write-Host $published.html_url
 }
 Update-Catalog -AdvanceLatest

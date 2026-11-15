@@ -7,13 +7,13 @@
 В Windows PowerShell или PowerShell 7 выполните:
 
 ```powershell
-irm https://raw.githubusercontent.com/Tapka-pm/tapka/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Tapka-pm/tapka/master/install.ps1 | iex
 ```
 
 В CMD выполните:
 
 ```cmd
-powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/Tapka-pm/tapka/main/install.ps1 | iex" && for %I in (tapka.exe) do @if /i not "%~$PATH:I"=="%LOCALAPPDATA%\tapka\shims\public\tapka.exe" set "PATH=%LOCALAPPDATA%\tapka\shims\public;%PATH%"
+powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/Tapka-pm/tapka/master/install.ps1 | iex" && for %I in (tapka.exe) do @if /i not "%~$PATH:I"=="%LOCALAPPDATA%\tapka\shims\public\tapka.exe" set "PATH=%LOCALAPPDATA%\tapka\shims\public;%PATH%"
 ```
 
 Сразу после установки выполните `tapka --help` в том же терминале. Нужны Windows x64 и интернет. Установщик работает от текущего пользователя и ставит переносимые .NET 11 и PowerShell 7 в дерево Tapka.
@@ -34,7 +34,7 @@ powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop
 
 ## Публикация
 
-Push стабильного тега формата `vX.Y.Z` запускает workflow Release tapka. Первый выпуск — `v0.1.0`. До push тега загрузите изменения ветки `main` и подготовьте изменения каталога в ветке `master` репозитория `Tapka-pm/packages`. Настройте в GitHub Actions secret `PACKAGES_TOKEN` с правом Contents: read and write только для репозитория каталога. У токена должен быть доступ к записи в `master`.
+Push стабильного тега формата `vX.Y.Z` запускает workflow Release tapka. До push тега загрузите изменения ветки `master` и подготовьте изменения каталога в ветке `master` репозитория `Tapka-pm/packages`. Настройте в GitHub Actions secret `PACKAGES_TOKEN` с правом Contents: read and write только для репозитория каталога. У токена должен быть доступ к записи в `master`.
 
 Workflow собирает и тестирует оба файла, загружает их в черновик GitHub Release и добавляет точный URL и SHA-256 клиентского ZIP в каталог. Затем он публикует Release и обновляет алиас `latest`, если этот выпуск новее. При сбое перезапустите workflow того же тега. Уже загруженные файлы сохраняются.
 

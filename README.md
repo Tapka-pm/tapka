@@ -30,7 +30,9 @@ powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop
 | `.\build.ps1 -Test` | `artifacts\test\tapka.exe` |
 | `.\build.ps1 -Test -Target Setup -Version 0.1.0` | `artifacts\test\tapka-setup-win-x64.exe` |
 
-Клиент в релизном ZIP использует .NET из приватной зависимости `dotnet-runtime-11`. При запуске tapka её shim передаёт путь к runtime через `DOTNET_ROOT` и `DOTNET_ROOT_X64`. Тестовый клиент содержит собственную среду выполнения, чтобы его можно было запустить напрямую. Общий проект MSBuild собирает нативный шаблон shim в `artifacts\build\shim\Release\x64\shim.exe`.
+Клиент и установщик подключают `src/shim/shim.targets`: MSBuild автоматически компилирует `launcher.c` и встраивает shim как ресурс `tapka.shim.exe`. Обычные команды `dotnet build src/tapka/tapka.csproj` и `dotnet publish src/setup/setup.csproj -c Release` работают без предварительного запуска `build.ps1` и передачи пути к shim. Нативный бинарник находится в `artifacts\build\shim\<Configuration>\x64\shim.exe`; он пересобирается при изменении исходника, скрипта компилятора или targets. Скрипт `build.ps1` выбирает параметры публикации и упаковывает релиз.
+
+Клиент в релизном ZIP использует .NET из приватной зависимости `dotnet-runtime-11`. При запуске tapka её shim передаёт путь к runtime через `DOTNET_ROOT` и `DOTNET_ROOT_X64`. Тестовый клиент содержит собственную среду выполнения, чтобы его можно было запустить напрямую.
 
 ## Публикация
 

@@ -1,25 +1,13 @@
 <Project DefaultTargets="Build">
+  <Import Project="shim.targets" />
   <PropertyGroup>
-    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
-    <Platform Condition="'$(Platform)' == ''">x64</Platform>
-    <OutputDirectory>$(MSBuildThisFileDirectory)../../artifacts/build/shim/$(Configuration)/$(Platform)</OutputDirectory>
-    <CompilerScript>$(MSBuildThisFileDirectory)compile.ps1</CompilerScript>
-    <LauncherSource>$(MSBuildThisFileDirectory)launcher.c</LauncherSource>
     <ProbeSource>$(MSBuildThisFileDirectory)../../tests/Shim.Tests/probe.c</ProbeSource>
   </PropertyGroup>
 
-  <Target Name="Validate">
-    <Error Condition="'$(OS)' != 'Windows_NT' or '$(Platform)' != 'x64'" Text="The shim build requires Windows and MSVC x64." />
-    <MakeDir Directories="$(OutputDirectory)" />
-  </Target>
+  <Target Name="Build" DependsOnTargets="BuildNativeShim" />
 
-  <Target Name="Build" DependsOnTargets="Validate" Inputs="$(MSBuildProjectFullPath);$(CompilerScript);$(LauncherSource)"
-          Outputs="$(OutputDirectory)/shim.exe">
-    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(CompilerScript)&quot; -Source &quot;$(LauncherSource)&quot; -Output &quot;$(OutputDirectory)/shim.exe&quot;" />
-  </Target>
-
-  <Target Name="BuildProbe" DependsOnTargets="Validate" Inputs="$(MSBuildProjectFullPath);$(CompilerScript);$(ProbeSource)"
-          Outputs="$(OutputDirectory)/shim-probe.exe">
-    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(CompilerScript)&quot; -Source &quot;$(ProbeSource)&quot; -Output &quot;$(OutputDirectory)/shim-probe.exe&quot;" />
+  <Target Name="BuildProbe" DependsOnTargets="ValidateNativeShim" Inputs="$(MSBuildProjectFullPath);$(ShimTargetsFile);$(ShimCompilerScript);$(ProbeSource)"
+          Outputs="$(ShimOutputDirectory)/shim-probe.exe">
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ShimCompilerScript)&quot; -Source &quot;$(ProbeSource)&quot; -Output &quot;$(ShimOutputDirectory)/shim-probe.exe&quot;" />
   </Target>
 </Project>

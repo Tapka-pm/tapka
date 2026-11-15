@@ -17,11 +17,11 @@
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
     <Compile Include="../tapka/*.cs" Exclude="../tapka/Program.cs;../tapka/InventoryCommands.cs" />
     <AssemblyMetadata Include="TapkaVersion" Value="$(Version)" />
-    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" />
   </ItemGroup>
-  <Target Name="RequireNativeShim" BeforeTargets="PrepareForBuild" Condition="!Exists('$(TapkaShimPath)')">
-    <Error Text="Run build.ps1 to compile and embed the native command shim." />
-  </Target>
+  <PropertyGroup>
+    <EmbedNativeShim>true</EmbedNativeShim>
+  </PropertyGroup>
+  <Import Project="../shim/shim.targets" />
   <Target Name="EmbedSqlite" BeforeTargets="AssignTargetPaths" DependsOnTargets="ResolvePackageAssets">
     <ItemGroup>
       <_SqliteDll Include="@(NativeCopyLocalItems)" Condition="'%(Filename)%(Extension)' == 'e_sqlite3.dll'" />

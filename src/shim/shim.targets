@@ -1,0 +1,26 @@
+<Project>
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <ShimOutputDirectory>$(MSBuildThisFileDirectory)../../artifacts/build/shim/$(Configuration)/x64</ShimOutputDirectory>
+    <ShimCompilerScript>$(MSBuildThisFileDirectory)compile.ps1</ShimCompilerScript>
+    <ShimLauncherSource>$(MSBuildThisFileDirectory)launcher.c</ShimLauncherSource>
+    <ShimTargetsFile>$(MSBuildThisFileFullPath)</ShimTargetsFile>
+    <TapkaShimPath>$(ShimOutputDirectory)/shim.exe</TapkaShimPath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(EmbedNativeShim)' == 'true'">
+    <EmbeddedResource Include="$(TapkaShimPath)" LogicalName="tapka.shim.exe" />
+  </ItemGroup>
+
+  <Target Name="ValidateNativeShim">
+    <Error Condition="'$(OS)' != 'Windows_NT'" Text="The shim build requires Windows and MSVC x64." />
+    <MakeDir Directories="$(ShimOutputDirectory)" />
+  </Target>
+
+  <Target Name="BuildNativeShim" BeforeTargets="PrepareForBuild" DependsOnTargets="ValidateNativeShim"
+          Condition="'$(DesignTimeBuild)' != 'true'"
+          Inputs="$(ShimTargetsFile);$(ShimCompilerScript);$(ShimLauncherSource)"
+          Outputs="$(TapkaShimPath)">
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ShimCompilerScript)&quot; -Source &quot;$(ShimLauncherSource)&quot; -Output &quot;$(TapkaShimPath)&quot;" />
+  </Target>
+</Project>

@@ -17,19 +17,13 @@ if (!$PSBoundParameters.ContainsKey('DotNet') -and (Test-Path -LiteralPath $loca
 }
 $output = Join-Path $artifacts $flavor
 $build = Join-Path $artifacts "build/$flavor"
-$shim = Join-Path $artifacts 'build/shim/Release/x64/shim.exe'
 $testBuild = if ($Test) { 'true' } else { 'false' }
 if (!$Target) { $Target = if ($Test) { 'Client' } else { 'All' } }
-
-& $DotNet msbuild (Join-Path $PSScriptRoot 'src/shim/shim.proj') -nologo -p:Configuration=Release -p:Platform=x64
-if ($LASTEXITCODE -ne 0) {
-    throw "Shim build failed with exit code $LASTEXITCODE."
-}
 
 function Publish-Tapka([string] $Project, [string] $Directory, [bool] $SelfContained) {
     & $DotNet publish (Join-Path $PSScriptRoot $Project) -c Release -r win-x64 `
         --self-contained $SelfContained.ToString().ToLowerInvariant() --artifacts-path $build -o $Directory `
-        "-p:TapkaShimPath=$shim" "-p:TapkaTestBuild=$testBuild" "-p:Version=$Version"
+        "-p:TapkaTestBuild=$testBuild" "-p:Version=$Version"
     if ($LASTEXITCODE -ne 0) {
         throw "Publication of $Project failed with exit code $LASTEXITCODE."
     }

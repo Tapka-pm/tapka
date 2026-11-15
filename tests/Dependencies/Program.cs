@@ -12,6 +12,11 @@ if (args is ["--archives", .. var archiveArgs])
     await ArchiveTests.RunAsync(arch, powerShell, archiveArgs);
     return;
 }
+if (args is ["--upgrades", var binary])
+{
+    await UpgradeTests.RunAsync(Path.GetFullPath(binary), arch);
+    return;
+}
 if (args.Length != 0)
 {
     throw new ArgumentException("Use test-archives.ps1 to run the archive integration tests.");
@@ -83,9 +88,9 @@ try
         using var inventory = await InstalledPackages.OpenForReadAsync(scope, CancellationToken.None);
         return inventory.Find(id);
     }
-    string PackageFile(string id, string file) => Path.Combine(installation, "packages", id, file);
+    string PackageFile(string id, string file, string version = "1") => Path.Combine(installation, "packages", id, version, file);
     string Public(string command) => Path.Combine(shims.PublicDirectory, command + ".exe");
-    string Private(string id, string command) => Path.Combine(shims.DependencyDirectory(id), command + ".exe");
+    string Private(string id, string command) => Path.Combine(shims.DependencyDirectory(shims.ActiveGeneration!, id), command + ".exe");
     void AssertPublic(params string[] expected)
     {
         var actual = Directory.GetFiles(shims.PublicDirectory, "*.exe").Select(Path.GetFileNameWithoutExtension);
@@ -96,7 +101,7 @@ try
 
     Recipe("powershell", [], ["pwsh"], files: new()
     {
-        ["pwsh.exe"] = ShimBinary.Create(ReadShim(), @"..\..", Path.GetRelativePath(installation, powerShell), "")
+        ["pwsh.exe"] = ShimBinary.Create(ReadShim(), @"..\..\..", Path.GetRelativePath(installation, powerShell), "")
     });
     Recipe("c", [], ["tapka-c", "old-c"]);
     Recipe("b", [Rename("c", ("TaPkA-C.ExE", "inner-c.exe"))], ["tapka-b"]);
@@ -116,7 +121,7 @@ try
     AssertPublic("tapka-a");
     Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && await Installed("powershell") is { Selector: null },
         "PowerShell was not bootstrapped privately.");
-    Check(!Directory.Exists(shims.DependencyDirectory("c")), "Unexpected directory for a package with no dependencies.");
+    Check(!Directory.Exists(shims.DependencyDirectory(shims.ActiveGeneration!, "c")), "Unexpected directory for a package with no dependencies.");
     Check(!File.Exists(Private("a", "tapka-b")) && !File.Exists(Private("a", "inner-c")), "A inherited the wrong names.");
     Check(File.Exists(Private("b", "inner-c")) && File.Exists(Private("a", "tapka-c")), "Dependency shims are missing.");
 
@@ -184,9 +189,9 @@ try
 
     Recipe("c", [], ["tapka-c", "rollback-c"], "3");
     Recipe("broken", ["c"], ["broken"]);
-    Directory.CreateDirectory(Public("broken")); // Force publication to fail after C has been replaced.
+    Directory.CreateDirectory(Public("broken"));
     await Fails(() => Install("broken"));
-    Check(await Installed("c") == currentC && await Installed("broken") is null && File.Exists(PackageFile("c", "tool.exe")),
+    Check(await Installed("c") == currentC && await Installed("broken") is null && File.Exists(PackageFile("c", "tool.exe", "2")),
         "Rollback did not restore C's files and database state.");
     Check(File.Exists(Private("a", "new-c")) && !File.Exists(Private("a", "rollback-c")),
         "Rollback did not restore A's dependency shims.");
@@ -253,9 +258,10 @@ try
     }
 
     File.Delete(PackageFile("b", "tool.exe"));
-    await Install("b", "1");
-    Check(File.Exists(PackageFile("b", "tool.exe")) && await Installed("b") == privateB! with { Selector = "1" },
-        "Reinstall did not restore a missing command or changed the original dates.");
+    await Fails(() => Install("b", "1"), "is incomplete");
+    Check(!File.Exists(PackageFile("b", "tool.exe")) && await Installed("b") == privateB! with { Selector = "1" },
+        "A damaged version was overwritten or its registry entry changed.");
+    File.WriteAllBytes(PackageFile("b", "tool.exe"), cmdBytes);
 
     const string prepareScript = """
         param([string]$Installer, [string]$Destination)

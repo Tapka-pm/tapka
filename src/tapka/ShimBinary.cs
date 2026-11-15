@@ -11,6 +11,23 @@ internal static class ShimBinary
     private static ReadOnlySpan<byte> Marker => "TAPKA_SHIM_CONFIG_V2:0e94b57a3d\0"u8;
     private static ReadOnlySpan<byte> LegacyMarker => "TAPKA_SHIM_CONFIG_V1:0e94b57a3d\0"u8;
     private static readonly UnicodeEncoding Utf16 = new(false, false, true);
+    public const string ActivePointer = @"shims\active";
+
+    public static bool IsPublic(ReadOnlySpan<byte> executable)
+    {
+        var offset = FindSettings(executable, Marker, 4);
+        return offset >= 0 && IsManaged(executable) && executable[(offset + FieldSize)..]
+            .StartsWith(Utf16.GetBytes(ActivePointer + "\0"));
+    }
+
+    public static byte[] CreateSettings(string target, string prefix, string runtime)
+    {
+        var settings = new byte[3 * FieldSize];
+        WriteField(settings.AsSpan(0, FieldSize), target, nameof(target));
+        WriteField(settings.AsSpan(FieldSize, FieldSize), prefix, nameof(prefix), optional: true);
+        WriteField(settings.AsSpan(2 * FieldSize, FieldSize), runtime, nameof(runtime), optional: true);
+        return settings;
+    }
 
     public static byte[] Create(ReadOnlySpan<byte> template, string rootRelative, string targetExe, string pathPrefix,
         string dotNetRoot = "")

@@ -3,15 +3,24 @@ using Microsoft.Data.Sqlite;
 namespace Tapka;
 
 internal sealed record InstalledPackage(string Id, string Version, string? Selector, string? Architecture,
-    string? Repository, string? DownloadUrl, string? Checksum, string? InstalledAt, string? VersionChangedAt);
+    string? Repository, string? DownloadUrl, string? Checksum, string? InstalledAt, string? VersionChangedAt,
+    string? RelativePath = null)
+{
+    public string PackagePath => RelativePath ?? Path.Combine("packages", Id);
+    public bool IsPinned => Selector == Version;
+}
 
 internal sealed class InstalledPackages : IDisposable
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private const string FileName = "installed.db";
-    private const string Columns =
+    private const string LegacyColumns =
         "id, version, selector, architecture, repository, download_url, checksum, installed_at, version_changed_at";
+    private string Columns => LegacyColumns + (legacySchema ? ", NULL" : ", relative_path");
     private readonly SqliteConnection connection;
+    private bool legacySchema;
+
+    public static bool Exists(InstallScope scope) => File.Exists(Path.Combine(scope.Root, FileName));
 
     private InstalledPackages(string path, SqliteOpenMode mode)
     {
@@ -63,7 +72,21 @@ internal sealed class InstalledPackages : IDisposable
         {
             using var command = inventory.CreateCommand("PRAGMA user_version");
             var version = (long)command.ExecuteScalar()!;
-            if (version != SchemaVersion)
+            if (version == 1 && mode == SqliteOpenMode.ReadWrite)
+            {
+                using var transaction = inventory.BeginWrite();
+                inventory.Execute("""
+                    ALTER TABLE packages ADD COLUMN relative_path TEXT;
+                    UPDATE packages SET relative_path = 'packages\' || id;
+                    """ + VersionsSchema + "PRAGMA user_version = 2;",
+                    transaction);
+                transaction.Commit();
+            }
+            else if (version == 1)
+            {
+                inventory.legacySchema = true;
+            }
+            else if (version != SchemaVersion)
             {
                 throw new InvalidDataException($"Unsupported installed package database schema {version} in '{path}'.");
             }
@@ -113,7 +136,8 @@ internal sealed class InstalledPackages : IDisposable
                 download_url TEXT,
                 checksum TEXT,
                 installed_at TEXT,
-                version_changed_at TEXT
+                version_changed_at TEXT,
+                relative_path TEXT
             );
             CREATE TABLE commands (
                 package_id TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
@@ -136,6 +160,7 @@ internal sealed class InstalledPackages : IDisposable
                 FOREIGN KEY (package_id, dependency_id)
                     REFERENCES dependencies(package_id, dependency_id) ON DELETE CASCADE
             );
+            {VersionsSchema}
             PRAGMA user_version = {SchemaVersion};
             """, transaction);
         schema.ExecuteNonQuery();
@@ -151,13 +176,32 @@ internal sealed class InstalledPackages : IDisposable
                     throw new InvalidDataException($"Missing dependency '{dependency.Id}' in package metadata '{path}'.");
                 }
             }
-            Save(package, manifest, transaction);
+            Save(package with { RelativePath = package.PackagePath }, manifest, transaction);
         }
         cancellationToken.ThrowIfCancellationRequested();
         transaction.Commit();
     }
 
     public SqliteTransaction BeginWrite() => connection.BeginTransaction();
+
+    private const string VersionsSchema = """
+        CREATE TABLE package_versions (
+            id TEXT NOT NULL, version TEXT NOT NULL COLLATE NOCASE, architecture TEXT, repository TEXT,
+            download_url TEXT, checksum TEXT, relative_path TEXT,
+            PRIMARY KEY (id, version)
+        );
+        INSERT INTO package_versions SELECT id, version, architecture, repository, download_url, checksum, relative_path FROM packages;
+        """;
+
+    public InstalledPackage? FindVersion(string id, string version)
+    {
+        using var command = CreateCommand("""
+            SELECT id, version, NULL, architecture, repository, download_url, checksum, NULL, NULL, relative_path
+            FROM package_versions WHERE id = $id AND version = $version
+            """, null, ("$id", id), ("$version", version));
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadPackage(reader) : null;
+    }
 
     public IReadOnlyList<InstalledPackage> List(string? query = null, bool explicitOnly = false)
     {
@@ -249,16 +293,19 @@ internal sealed class InstalledPackages : IDisposable
     {
         Execute("""
             INSERT INTO packages (id, version, selector, architecture, repository, download_url, checksum,
-                installed_at, version_changed_at)
-            VALUES ($id, $version, $selector, $architecture, $repository, $url, $checksum, $installed, $changed)
+                installed_at, version_changed_at, relative_path)
+            VALUES ($id, $version, $selector, $architecture, $repository, $url, $checksum, $installed, $changed, $path)
             ON CONFLICT (id) DO UPDATE SET version = excluded.version, selector = excluded.selector,
                 architecture = excluded.architecture, repository = excluded.repository,
                 download_url = excluded.download_url, checksum = excluded.checksum,
-                installed_at = excluded.installed_at, version_changed_at = excluded.version_changed_at
+                installed_at = excluded.installed_at, version_changed_at = excluded.version_changed_at,
+                relative_path = excluded.relative_path;
+            INSERT INTO package_versions VALUES ($id, $version, $architecture, $repository, $url, $checksum, $path)
+                ON CONFLICT (id, version) DO NOTHING;
             """, transaction, ("$id", package.Id), ("$version", package.Version), ("$selector", package.Selector),
             ("$architecture", package.Architecture), ("$repository", package.Repository),
             ("$url", package.DownloadUrl), ("$checksum", package.Checksum),
-            ("$installed", package.InstalledAt), ("$changed", package.VersionChangedAt));
+            ("$installed", package.InstalledAt), ("$changed", package.VersionChangedAt), ("$path", package.RelativePath));
         Execute("DELETE FROM commands WHERE package_id = $id; DELETE FROM dependencies WHERE package_id = $id",
             transaction, ("$id", package.Id));
         foreach (var (name, target) in manifest.Commands)
@@ -282,7 +329,7 @@ internal sealed class InstalledPackages : IDisposable
     {
         string? Optional(int column) => reader.IsDBNull(column) ? null : reader.GetString(column);
         return new InstalledPackage(reader.GetString(0), reader.GetString(1), Optional(2), Optional(3),
-            Optional(4), Optional(5), Optional(6), Optional(7), Optional(8));
+            Optional(4), Optional(5), Optional(6), Optional(7), Optional(8), Optional(9));
     }
 
     private void Execute(string sql, SqliteTransaction transaction, params (string Name, object? Value)[] parameters)

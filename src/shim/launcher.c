@@ -108,6 +108,64 @@ static BOOL prepend_dependencies(const wchar_t *directory)
     return SetEnvironmentVariableW(L"PATH", path);
 }
 
+static BOOL read_exact(const wchar_t *path, void *buffer, DWORD size)
+{
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    DWORD read = 0;
+    LARGE_INTEGER length;
+    BOOL ok = GetFileSizeEx(file, &length) && length.QuadPart == size &&
+        ReadFile(file, buffer, size, &read, NULL) && read == size;
+    CloseHandle(file);
+    return ok;
+}
+
+static BOOL load_active_settings(const wchar_t *root, const wchar_t *name,
+    wchar_t *target, wchar_t *prefix, wchar_t *dotnet)
+{
+    static wchar_t path[WINDOWS_PATH_CAPACITY];
+    char generation[32];
+    if (!resolve_path(root, L"shims\\active", path) || !read_exact(path, generation, sizeof(generation))) {
+        return FALSE;
+    }
+    wchar_t guid[33];
+    for (size_t i = 0; i < sizeof(generation); ++i) {
+        char c = generation[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return FALSE;
+        }
+        guid[i] = (wchar_t)c;
+    }
+    guid[32] = L'\0';
+    static wchar_t relative[WINDOWS_PATH_CAPACITY];
+    if (swprintf_s(relative, ARRAYSIZE(relative), L"shims\\generations\\%ls\\public\\%ls.cfg", guid, name) < 0 ||
+        !resolve_path(root, relative, path)) {
+        return FALSE;
+    }
+    static wchar_t settings[3][WINDOWS_PATH_CAPACITY];
+    return read_exact(path, settings, sizeof(settings)) && copy_setting(target, settings[0], FALSE) &&
+        copy_setting(prefix, settings[1], TRUE) && copy_setting(dotnet, settings[2], TRUE);
+}
+
+static HANDLE lock_publication(const wchar_t *root)
+{
+    static wchar_t path[WINDOWS_PATH_CAPACITY];
+    if (!resolve_path(root, L"shims\\activation.lock", path)) {
+        return INVALID_HANDLE_VALUE;
+    }
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        HANDLE lock = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (lock != INVALID_HANDLE_VALUE || GetLastError() != ERROR_SHARING_VIOLATION || GetTickCount64() - start >= 10000) {
+            return lock;
+        }
+        Sleep(25);
+    }
+}
+
 int wmain(void)
 {
     static wchar_t module[WINDOWS_PATH_CAPACITY];
@@ -120,6 +178,8 @@ int wmain(void)
         fwprintf(stderr, L"tapka: invalid command shim path.\n");
         return 1;
     }
+    static wchar_t name[WINDOWS_PATH_CAPACITY];
+    wcscpy(name, filename + 1);
     filename[1] = L'\0';
 
     static wchar_t root_relative[WINDOWS_PATH_CAPACITY];
@@ -136,7 +196,22 @@ int wmain(void)
 
     static wchar_t root[WINDOWS_PATH_CAPACITY];
     static wchar_t target[WINDOWS_PATH_CAPACITY];
-    if (!resolve_path(module, root_relative, root) || !resolve_path(root, target_relative, target)) {
+    if (!resolve_path(module, root_relative, root)) {
+        return print_windows_error(L"cannot resolve the Tapka directory");
+    }
+    if (wcscmp(target_relative, L"shims\\active") == 0) {
+        HANDLE lock = lock_publication(root);
+        if (lock == INVALID_HANDLE_VALUE) {
+            return print_windows_error(L"cannot read the active installation");
+        }
+        BOOL loaded = load_active_settings(root, name, target_relative, prefix_relative, dotnet_relative);
+        CloseHandle(lock);
+        if (!loaded) {
+            fwprintf(stderr, L"tapka: command '%ls' is unavailable in the active installation.\n", name);
+            return 1;
+        }
+    }
+    if (!resolve_path(root, target_relative, target)) {
         return print_windows_error(L"cannot resolve the command target");
     }
     if (*prefix_relative != L'\0') {
@@ -156,6 +231,7 @@ int wmain(void)
         static wchar_t dotnet[WINDOWS_PATH_CAPACITY];
         if (!resolve_path(root, dotnet_relative, dotnet) ||
             !SetEnvironmentVariableW(L"DOTNET_ROOT", dotnet) ||
+            !SetEnvironmentVariableW(L"DOTNET_ROOT_ARM64", dotnet) ||
             !SetEnvironmentVariableW(L"DOTNET_ROOT_X64", dotnet)) {
             return print_windows_error(L"cannot set the private .NET runtime path");
         }

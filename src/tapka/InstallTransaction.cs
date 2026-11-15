@@ -5,21 +5,23 @@ internal sealed class InstallTransaction(string root) : IDisposable
     private readonly string workDirectory = Path.Combine(root, $".install-{Guid.NewGuid():N}");
     private readonly List<Action> undo = [];
     private bool committed;
+    private bool disposed;
 
     public string CreateStagingDirectory(string id) =>
         Directory.CreateDirectory(Path.Combine(workDirectory, id)).FullName;
 
     public void PublishPackage(string staged, string destination)
     {
-        if (Directory.Exists(destination))
-        {
-            var backup = Path.Combine(Path.GetDirectoryName(staged)!, "previous");
-            Directory.Move(destination, backup);
-            undo.Add(() => Directory.Move(backup, destination));
-        }
-
+        EnsureDirectory(Path.GetDirectoryName(destination)!);
         Directory.Move(staged, destination);
         undo.Add(() => Directory.Move(destination, staged));
+    }
+
+    public void MoveFile(string source, string destination)
+    {
+        EnsureDirectory(Path.GetDirectoryName(destination)!);
+        File.Move(source, destination);
+        undo.Add(() => File.Move(destination, source));
     }
 
     public void EnsureDirectory(string directory)
@@ -31,16 +33,6 @@ internal sealed class InstallTransaction(string root) : IDisposable
         EnsureDirectory(Path.GetDirectoryName(directory)!);
         Directory.CreateDirectory(directory);
         undo.Add(() => Directory.Delete(directory));
-    }
-
-    public void RemoveEmptyDirectory(string directory)
-    {
-        if (Directory.EnumerateFileSystemEntries(directory).Any())
-        {
-            return;
-        }
-        Directory.Delete(directory);
-        undo.Add(() => Directory.CreateDirectory(directory));
     }
 
     public void WriteFile(string path, byte[]? contents)
@@ -60,6 +52,8 @@ internal sealed class InstallTransaction(string root) : IDisposable
 
     public void Dispose()
     {
+        if (disposed) return;
+        disposed = true;
         var restored = true;
         if (!committed)
         {

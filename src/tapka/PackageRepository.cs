@@ -9,7 +9,7 @@ internal sealed record PackageDependency(string Id, Dictionary<string, string> R
 internal sealed record PackageRelease(string Id, string Version, PackageDependency[] Dependencies,
     Uri DownloadUrl, string Checksum, string? Script, ArchiveFormat? Archive, Dictionary<string, string> Commands);
 
-internal sealed class PackageRepository(HttpClient http, string source)
+internal sealed class PackageRepository(HttpClient http, string source, string? snapshot = null)
 {
     public const string DefaultSource = "https://raw.githubusercontent.com/Tapka-pm/packages/master/";
 
@@ -19,7 +19,10 @@ internal sealed class PackageRepository(HttpClient http, string source)
         @"\A(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|\z)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private readonly Uri? remote = GetRemoteSource(source);
-    public string Source => remote?.AbsoluteUri ?? Path.GetFullPath(source);
+    public string Source => remote?.AbsoluteUri ?? Path.TrimEndingDirectorySeparator(Path.GetFullPath(source));
+    public Uri? ArchiveUrl => remote is null ? null : Source == DefaultSource
+        ? new Uri("https://github.com/Tapka-pm/packages/archive/refs/heads/master.zip")
+        : new Uri(remote, "repository.zip");
 
     public async Task<PackageRelease> ResolveAsync(string id, string requestedVersion, string architecture,
         CancellationToken cancellationToken)
@@ -36,6 +39,10 @@ internal sealed class PackageRepository(HttpClient http, string source)
             }
 
             var (version, release) = ResolveVersion(config, requestedVersion);
+            if (!IsPathSegment(version) || version.Length > 255)
+            {
+                throw new InvalidDataException($"Version '{version}' is not a valid Windows directory name.");
+            }
 
             if (!release.GetProperty("architectures").TryGetProperty(architecture, out var target))
             {
@@ -181,9 +188,9 @@ internal sealed class PackageRepository(HttpClient http, string source)
     {
         try
         {
-            if (remote is null)
+            if (snapshot is not null || remote is null)
             {
-                return await File.ReadAllBytesAsync(Path.Combine(Path.GetFullPath(source), "packages", id, file), cancellationToken);
+                return await File.ReadAllBytesAsync(Path.Combine(snapshot ?? Source, "packages", id, file), cancellationToken);
             }
 
             var path = string.Join('/', file.Split('\\').Select(Uri.EscapeDataString));

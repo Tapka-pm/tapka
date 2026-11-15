@@ -16,9 +16,11 @@ $client = Join-Path $PSScriptRoot 'artifacts/test/tapka.exe'
 $zipName = 'tapka-win-x64.zip'
 $zip = Join-Path $PSScriptRoot "artifacts/release/$zipName"
 
+$assetVersions = @{}
 foreach ($id in 'dotnet-runtime-11', 'powershell') {
     $config = Get-Content -LiteralPath (Join-Path $Repository "packages/$id/config.json") -Raw | ConvertFrom-Json -AsHashtable
     $release = $config.versions[$config.versions.latest.to]
+    $assetVersions[$id] = $config.versions.latest.to
     $target = $release.architectures.x64
     $name = [IO.Path]::GetFileName(([Uri]$target.download.url).AbsolutePath)
     $directory = (New-Item -ItemType Directory -Path (Join-Path $downloads $id) -Force).FullName
@@ -87,13 +89,13 @@ try {
     & $shim --help
     if ($LASTEXITCODE) { throw 'The installed shim could not start tapka with its private runtime.' }
     $installed = & $client list --root $root
-    if ($LASTEXITCODE -or "tapka`t$Version`t$Version`texplicit" -cnotin $installed -or
+    if ($LASTEXITCODE -or "tapka`t$Version`tlatest`texplicit" -cnotin $installed -or
         !($installed -cmatch '^dotnet-runtime-11\t[^\t]+\t-\tautomatic$') -or
         !($installed -cmatch '^powershell\t[^\t]+\t-\tautomatic$')) {
         throw 'The client could not read the expected packages from the setup database.'
     }
     if ((Get-ChildItem -LiteralPath $public -Name) -ne 'tapka.exe' -or
-        !(Test-Path -LiteralPath (Join-Path $root 'packages/powershell/pwsh.exe'))) {
+        !(Test-Path -LiteralPath (Join-Path $root "packages/powershell/$($assetVersions.powershell)/pwsh.exe"))) {
         throw 'Setup did not install the expected version and private dependencies.'
     }
     & $setup @options

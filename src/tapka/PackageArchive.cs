@@ -32,8 +32,8 @@ internal static class PackageArchive
     public static bool HasToolFiles(string directory, string id, Dictionary<string, string> commands) =>
         id is not (ExtractorPackage or BootstrapPackage) || FindTool(directory, id, commands) is not null;
 
-    public static string GetTool(string packages, string id, Dictionary<string, string> commands) =>
-        FindTool(Path.Combine(packages, id), id, commands) ??
+    public static string GetTool(string directory, string id, Dictionary<string, string> commands) =>
+        FindTool(directory, id, commands) ??
         throw new IOException($"Package '{id}' did not provide the required extractor files.");
 
     private static string? FindTool(string directory, string id, Dictionary<string, string> commands)

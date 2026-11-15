@@ -35,7 +35,7 @@ internal static class InventoryCommands
         {
             var id = ReadId(result, infoId);
             var (package, manifest, requiredBy) = inventory.Details(id) ?? throw NotInstalled(id);
-            var directory = Path.Combine(scope.PackagesDirectory, id);
+            var directory = Path.Combine(scope.Root, package.PackagePath);
             Console.WriteLine($"ID: {id}");
             Console.WriteLine($"Version: {package.Version}");
             Console.WriteLine($"Selector: {package.Selector ?? "(none)"}");
@@ -57,8 +57,8 @@ internal static class InventoryCommands
         Configure(path, (inventory, scope, result) =>
         {
             var id = ReadId(result, pathId);
-            _ = inventory.Find(id) ?? throw NotInstalled(id);
-            var directory = Path.Combine(scope.PackagesDirectory, id);
+            var package = inventory.Find(id) ?? throw NotInstalled(id);
+            var directory = Path.Combine(scope.Root, package.PackagePath);
             if (!Directory.Exists(directory))
             {
                 throw new IOException($"Package directory '{directory}' is missing.");

@@ -41,9 +41,10 @@ setup.SetAction(async (parseResult, cancellationToken) =>
 #endif
         Console.WriteLine($"Installing tapka {version}...");
         var repository = new PackageRepository(http, source);
-        var installer = new PackageInstaller(scope, repository, http, systemPowerShell: null);
+        var installer = new PackageInstaller(scope, repository, http, systemPowerShell: null,
+            catalog: new CatalogCache(scope, http), refreshCatalog: true);
         using var sqlite = SetupSqlite.Load();
-        await installer.InstallAsync("tapka", version, "x64", cancellationToken, verifyTapka: true);
+        await installer.InstallAsync("tapka", version, "x64", cancellationToken, verifyTapka: true, trackLatest: true);
         Console.WriteLine("Tapka is installed.");
         if (!parseResult.GetValue(noPause))
         {

@@ -14,10 +14,12 @@ internal sealed class InstallScope(string root, bool isTest)
     public string Root { get; } = root;
     public string PackagesDirectory => Path.Combine(Root, "packages");
 
-    public async Task<FileStream> AcquireInstallLockAsync(CancellationToken cancellationToken)
+    public Task<FileStream> AcquireInstallLockAsync(CancellationToken cancellationToken) =>
+        AcquireLockAsync(Path.Combine(Root, ".install.lock"), TimeSpan.FromMinutes(10), cancellationToken);
+
+    public static async Task<FileStream> AcquireLockAsync(string lockFile, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(Root);
-        var lockFile = Path.Combine(Root, ".install.lock");
+        Directory.CreateDirectory(Path.GetDirectoryName(lockFile)!);
         var elapsed = Stopwatch.StartNew();
         while (true)
         {
@@ -28,11 +30,11 @@ internal sealed class InstallScope(string root, bool isTest)
             }
             catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
             {
-                if (elapsed.Elapsed >= TimeSpan.FromMinutes(10))
+                if (elapsed.Elapsed >= timeout)
                 {
-                    throw new IOException("Timed out waiting for another tapka installation to finish.", error);
+                    throw new IOException($"Timed out waiting for Tapka to release '{Path.GetFileName(lockFile)}'.", error);
                 }
-                await Task.Delay(200, cancellationToken);
+                await Task.Delay(50, cancellationToken);
             }
         }
     }

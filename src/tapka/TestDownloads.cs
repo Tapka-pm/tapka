@@ -14,6 +14,10 @@ internal sealed class TestDownloads(string directory) : HttpMessageHandler
         {
             throw new HttpRequestException($"Unmapped integration test URL '{request.RequestUri}'.");
         }
+        if (uri.LocalPath == "/repository.zip")
+        {
+            return Task.FromResult(Respond(Path.Combine(root, "repository.zip")));
+        }
         var path = uri.LocalPath.Split('/');
         if (path is not ["", var package, var filename] ||
             !PackageRepository.IsPathSegment(package) || !PackageRepository.IsPathSegment(filename))
@@ -21,11 +25,11 @@ internal sealed class TestDownloads(string directory) : HttpMessageHandler
             throw new HttpRequestException($"Invalid integration test URL '{uri}'.");
         }
 
-        var file = Path.Combine(root, package, filename);
-        var response = File.Exists(file)
+        return Task.FromResult(Respond(Path.Combine(root, package, filename)));
+    }
+
+    private static HttpResponseMessage Respond(string file) => File.Exists(file)
             ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(File.OpenRead(file)) }
             : new HttpResponseMessage(HttpStatusCode.NotFound);
-        return Task.FromResult(response);
-    }
 }
 #endif

@@ -43,7 +43,9 @@ internal static class ArchiveTests
         var downloads = Directory.CreateDirectory(Path.Combine(root, "downloads")).FullName;
         const string filename = "дистрибутив.payload";
 
-        string Package(string id, string file = "") => Path.Combine(installRoot, "packages", id, file);
+        var assetVersions = new Dictionary<string, string>();
+        string Package(string id, string file = "") => Path.Combine(installRoot, "packages", id,
+            assetVersions.GetValueOrDefault(id, "1"), file);
         string Public(string name) => Path.Combine(installRoot, "shims", "public", name);
         string Config(string id) => Path.Combine(recipes, id, "config.json");
         string Download(string id) => Path.Combine(downloads, id, filename);
@@ -56,6 +58,8 @@ internal static class ArchiveTests
 
         async Task Install(string id, string? error = null)
         {
+            var update = await Run(binary, root, "update", "--repository", catalog, "--root", installRoot);
+            Check(update.ExitCode == 0, $"Catalog refresh failed: {update.Error}");
             var result = await Run(binary, root, "install", id, "--repository", catalog, "--root", installRoot,
                 "--fixture-downloads", downloads);
             Check(error is null ? result.ExitCode == 0 : result.ExitCode == 1 &&
@@ -160,6 +164,7 @@ internal static class ArchiveTests
             var config = JsonNode.Parse(File.ReadAllText(Path.Combine(source, "config.json")))!;
             var versions = config["versions"]!;
             var latest = versions["latest"]!["to"]!.GetValue<string>();
+            assetVersions[id] = latest;
             var download = versions[latest]!["architectures"]![arch]!["download"]!;
             var uri = new Uri(download["url"]!.GetValue<string>());
             var checksum = download["sha256"]!.GetValue<string>();
@@ -219,7 +224,8 @@ internal static class ArchiveTests
         {
             Check(await Installed(id) is { Selector: null }, $"Missing automatic package '{id}' in the registry.");
         }
-        Check(!Directory.Exists(Path.Combine(installRoot, "shims", "deps", "seven")), "Archive tools became runtime dependencies.");
+        var shims = new PackageShims(installRoot);
+        Check(!Directory.Exists(shims.DependencyDirectory(shims.ActiveGeneration!, "seven")), "Archive tools became runtime dependencies.");
         await Install("seven-tail");
         Check(File.ReadAllText(Package("seven-tail", FileName)) == Text, "Wrong 7z output for an archive with trailing data.");
         var userPath = File.ReadAllText(Path.Combine(installRoot, "user-path.txt"));
@@ -231,9 +237,11 @@ internal static class ArchiveTests
             File.Delete(Download(id));
         }
         var installedSeven = await Installed("seven");
-        File.Move(extractorConfig, extractorConfig + ".bak");
+        var extractorDirectory = Path.GetDirectoryName(extractorConfig)!;
+        var backup = Path.Combine(root, "extractor recipe");
+        Directory.Move(extractorDirectory, backup);
         await Install("seven@1");
-        File.Move(extractorConfig + ".bak", extractorConfig);
+        Directory.Move(backup, extractorDirectory);
         Check(installedSeven is not null && await Installed("seven") == installedSeven with { Selector = "1" },
             "Reinstall changed the installed package record or lost the selector.");
         await Install("rar4");
@@ -253,7 +261,7 @@ internal static class ArchiveTests
         await Install("7zip");
         Check(File.Exists(Public("7z.exe")) && !File.Exists(Public("7zr.exe")), "Explicit installation did not promote only 7-Zip.");
         File.Move(extractorConfig, extractorConfig + ".bak");
-        Recipe("7zip", "7z", seven);
+        Recipe("7zip", "7z", seven, version: "2");
         await Install("7zip", "Dependency cycle");
         Check(File.Exists(Package("7zip", "7z.dll")) && File.Exists(Public("7z.exe")),
             "A failed update removed the existing extractor or its shim.");
@@ -414,11 +422,11 @@ internal static class ArchiveTests
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA user_version = 2";
+            command.CommandText = "PRAGMA user_version = 99";
             command.ExecuteNonQuery();
         }
         var unsupported = await Command(fresh, "list");
-        Check(unsupported.ExitCode == 1 && unsupported.Error.Contains("schema 2"), "An unknown schema version was accepted.");
+        Check(unsupported.ExitCode == 1 && unsupported.Error.Contains("schema 99"), "An unknown schema version was accepted.");
         File.WriteAllText(database, "not SQLite");
         var corrupt = await Command(fresh, "list");
         Check(corrupt.ExitCode == 1 && File.ReadAllText(database) == "not SQLite", "The corrupt database was replaced.");
@@ -427,7 +435,7 @@ internal static class ArchiveTests
         Check(truncated.ExitCode == 1 && new FileInfo(database).Length == 0, "The truncated database was replaced.");
     }
 
-    private static async Task<(int ExitCode, string Output, string Error)> Run(string executable, string directory,
+    internal static async Task<(int ExitCode, string Output, string Error)> Run(string executable, string directory,
         params string[] args)
     {
         var start = Start(executable, directory, args);

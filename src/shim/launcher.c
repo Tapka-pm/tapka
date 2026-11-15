@@ -36,12 +36,12 @@ static const wchar_t *skip_executable(const wchar_t *command_line)
     return command_line;
 }
 
-static BOOL read_target(const wchar_t *file, wchar_t *target, DWORD capacity)
+static DWORD read_target(const wchar_t *file, wchar_t *target, DWORD capacity)
 {
     HANDLE reader = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (reader == INVALID_HANDLE_VALUE) {
-        return FALSE;
+        return 0;
     }
 
     DWORD bytes = 0;
@@ -50,15 +50,51 @@ static BOOL read_target(const wchar_t *file, wchar_t *target, DWORD capacity)
     CloseHandle(reader);
     if (!read) {
         SetLastError(error);
-        return FALSE;
+        return 0;
     }
-    if (bytes == 0 || bytes >= capacity * sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
+    DWORD length = bytes / sizeof(wchar_t);
+    if (length < 4 || length == capacity || bytes % sizeof(wchar_t) != 0 || target[length - 1] != L'\0') {
         SetLastError(ERROR_INVALID_DATA);
+        return 0;
+    }
+
+    return length;
+}
+
+static BOOL prepend_dependencies(const wchar_t *directory)
+{
+    DWORD attributes = GetFileAttributesW(directory);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        SetLastError(ERROR_DIRECTORY);
         return FALSE;
     }
 
-    target[bytes / sizeof(wchar_t)] = L'\0';
-    return TRUE;
+    // The updated environment is local to the shim and inherited by its child.
+    static wchar_t path[WINDOWS_PATH_CAPACITY];
+    size_t prefix = wcslen(directory);
+    if (prefix + 2 > ARRAYSIZE(path)) {
+        SetLastError(ERROR_BUFFER_OVERFLOW);
+        return FALSE;
+    }
+    wcscpy(path, directory);
+    DWORD capacity = (DWORD)(ARRAYSIZE(path) - prefix - 1);
+    SetLastError(ERROR_SUCCESS);
+    DWORD inherited = GetEnvironmentVariableW(L"PATH", path + prefix + 1, capacity);
+    if (inherited == 0 && GetLastError() != ERROR_SUCCESS && GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+        return FALSE;
+    }
+    if (inherited >= capacity) {
+        SetLastError(ERROR_BUFFER_OVERFLOW);
+        return FALSE;
+    }
+    if (inherited != 0) {
+        path[prefix] = L';';
+    }
+    return SetEnvironmentVariableW(L"PATH", path);
 }
 
 int wmain(void)
@@ -71,34 +107,31 @@ int wmain(void)
     }
     wcscpy(executable + length, target_suffix);
 
-    static wchar_t target[WINDOWS_PATH_CAPACITY];
-    if (!read_target(executable, target, WINDOWS_PATH_CAPACITY)) {
+    static wchar_t target[2 * WINDOWS_PATH_CAPACITY];
+    DWORD target_length = read_target(executable, target, ARRAYSIZE(target));
+    if (target_length == 0) {
         return print_windows_error(L"cannot read the command target");
     }
-
-    wchar_t *filename = wcsrchr(executable, L'\\');
-    if (filename != NULL) {
-        *filename = L'\0';
-    }
-    wchar_t *shims = wcsrchr(executable, L'\\');
-    const wchar_t packages[] = L"\\packages\\";
-    if (filename == NULL || shims == NULL ||
-        (size_t)(shims - executable) + ARRAYSIZE(packages) + wcslen(target) > WINDOWS_PATH_CAPACITY) {
-        fwprintf(stderr, L"tapka: cannot locate the package directory.\n");
+    size_t executable_length = wcslen(target);
+    const wchar_t *dependencies = target + executable_length + 1;
+    if (executable_length == 0 || executable_length + 2 >= target_length ||
+        wcslen(dependencies) + executable_length + 2 != target_length) {
+        fwprintf(stderr, L"tapka: invalid command target file.\n");
         return 1;
     }
-    wcscpy(shims, packages);
-    wcscpy(shims + ARRAYSIZE(packages) - 1, target);
+    if (!prepend_dependencies(dependencies)) {
+        return print_windows_error(L"cannot set the package dependency PATH");
+    }
 
     // Pass the argument tail unchanged, including quotes and trailing backslashes.
     const wchar_t *arguments = skip_executable(GetCommandLineW());
     static wchar_t command_line[WINDOWS_PATH_CAPACITY];
-    if (wcslen(executable) + wcslen(arguments) + 3 > WINDOWS_PATH_CAPACITY) {
+    if (executable_length + wcslen(arguments) + 3 > WINDOWS_PATH_CAPACITY) {
         fwprintf(stderr, L"tapka: the command line is too long.\n");
         return 1;
     }
     wcscpy(command_line, L"\"");
-    wcscat(command_line, executable);
+    wcscat(command_line, target);
     wcscat(command_line, L"\"");
     wcscat(command_line, arguments);
 
@@ -111,7 +144,7 @@ int wmain(void)
     };
     PROCESS_INFORMATION child = {0};
     SetConsoleCtrlHandler(handle_console_interrupt, TRUE);
-    if (!CreateProcessW(executable, command_line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child)) {
+    if (!CreateProcessW(target, command_line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child)) {
         return print_windows_error(L"cannot launch the installed command");
     }
 

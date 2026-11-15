@@ -4,7 +4,9 @@ using System.Text.RegularExpressions;
 
 namespace Tapka;
 
-internal sealed record PackageRelease(string Id, string Version, string[] Dependencies,
+internal sealed record PackageDependency(string Id, Dictionary<string, string> Rename);
+
+internal sealed record PackageRelease(string Id, string Version, PackageDependency[] Dependencies,
     Uri DownloadUrl, string Checksum, string? Script, Dictionary<string, string> Commands);
 
 internal sealed class PackageRepository(HttpClient http, string source)
@@ -77,17 +79,13 @@ internal sealed class PackageRepository(HttpClient http, string source)
             var commands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var command in target.GetProperty("commands").EnumerateObject())
             {
-                var filename = command.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                    ? command.Name : command.Name + ".exe";
-                if (!CommandName.IsMatch(command.Name) || DeviceName.IsMatch(command.Name) ||
-                    !commands.TryAdd(filename, RelativePath(command.Value.GetString())))
+                if (!commands.TryAdd(NormalizeCommand(command.Name), RelativePath(command.Value.GetString())))
                 {
                     throw new InvalidDataException($"Invalid or duplicate command '{command.Name}'.");
                 }
             }
 
-            var dependencies = release.GetProperty("dependencies").EnumerateArray()
-                .Select(dependency => ValidateId(dependency.GetString())).ToArray();
+            var dependencies = ReadDependencies(release.GetProperty("dependencies"));
             return new PackageRelease(id, version, dependencies, url, checksum, script, commands);
         }
         catch (Exception error) when (error is JsonException or InvalidDataException
@@ -95,6 +93,51 @@ internal sealed class PackageRepository(HttpClient http, string source)
         {
             throw new IOException($"Invalid recipe for '{id}': {error.Message}", error);
         }
+    }
+
+    private static PackageDependency[] ReadDependencies(JsonElement entries)
+    {
+        var dependencies = new List<PackageDependency>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in entries.EnumerateArray())
+        {
+            var rename = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string id;
+            if (entry.ValueKind == JsonValueKind.String)
+            {
+                id = ValidateId(entry.GetString());
+            }
+            else
+            {
+                id = ValidateId(RequiredString(entry, "id"));
+                foreach (var command in entry.GetProperty("rename").EnumerateObject())
+                {
+                    if (!rename.TryAdd(NormalizeCommand(command.Name), NormalizeCommand(command.Value.GetString())))
+                    {
+                        throw new InvalidDataException($"Duplicate rename for '{command.Name}' in dependency '{id}'.");
+                    }
+                }
+            }
+
+            if (!ids.Add(id))
+            {
+                throw new InvalidDataException($"Duplicate dependency '{id}'.");
+            }
+
+            dependencies.Add(new PackageDependency(id, rename));
+        }
+
+        return dependencies.ToArray();
+    }
+
+    private static string NormalizeCommand(string? name)
+    {
+        if (name is null || !CommandName.IsMatch(name) || DeviceName.IsMatch(name))
+        {
+            throw new InvalidDataException($"Invalid command '{name}'.");
+        }
+
+        return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name : name + ".exe";
     }
 
     private static (string Version, JsonElement Release) ResolveVersion(JsonElement config, string requestedVersion)

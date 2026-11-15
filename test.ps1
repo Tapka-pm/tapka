@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $binaryPath = (Resolve-Path -LiteralPath $Binary).Path
 $testParent = (New-Item -ItemType Directory -Path (Join-Path $PSScriptRoot 'artifacts/test-data') -Force).FullName
 $testRoot = Join-Path $testParent "smoke $([Guid]::NewGuid().ToString('N'))"
-$shimDirectory = Join-Path $testRoot 'shims'
+$shimDirectory = Join-Path $testRoot 'shims/public'
 $savedTestRoot = $env:TAPKA_TEST_ROOT
 $savedPath = $env:Path
 $savedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -46,7 +46,7 @@ try {
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
     $commands = @'
 $ErrorActionPreference = 'Stop'
-$expected = Join-Path $env:TAPKA_TEST_ROOT 'shims\git.exe'
+$expected = Join-Path $env:TAPKA_TEST_ROOT 'shims\public\git.exe'
 if ((Get-Command git.exe).Source -ne $expected) { throw 'PowerShell selected a different git.exe.' }
 git --version
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

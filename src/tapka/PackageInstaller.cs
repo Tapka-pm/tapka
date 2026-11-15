@@ -1,21 +1,25 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace Tapka;
 
-internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http)
+internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http, string? systemPowerShell)
 {
     private const string InstallMarker = ".tapka-version";
     private const string InstallSelector = ".tapka-selector";
+    private const string ManifestFile = ".tapka-package.json";
 
     public async Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(scope.Root);
         using var installLock = await AcquireLockAsync(cancellationToken);
         var packages = Directory.CreateDirectory(Path.Combine(scope.Root, "packages")).FullName;
-        var shims = new PackageShims(Path.Combine(scope.Root, "shims"));
-        var powerShell = shims.FindPowerShell() ?? FindSystemPowerShell();
+        var shims = new PackageShims(scope.Root);
+        var manifests = ReadManifests(packages);
+        var powerShell = FindTapkaPowerShell(packages, manifests.GetValueOrDefault("powershell")) ?? systemPowerShell;
         var plan = new List<PackageRelease>();
         var visiting = new HashSet<string>(StringComparer.Ordinal);
         var resolved = new HashSet<string>(StringComparer.Ordinal);
@@ -36,7 +40,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             var release = await repository.ResolveAsync(package, selector ?? "latest", architecture, cancellationToken);
             foreach (var dependency in release.Dependencies)
             {
-                await ResolveAsync(dependency);
+                await ResolveAsync(dependency.Id);
             }
 
             if (release.Script is not null && !IsInstalled(packages, release) && powerShell is null &&
@@ -60,38 +64,78 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
 
         await ResolveAsync(id, version);
-        shims.CheckConflicts(plan, packages);
+        foreach (var release in plan)
+        {
+            manifests[release.Id] = new PackageManifest(release.Dependencies, release.Commands);
+        }
+
+        var explicitIds = manifests.Keys.Where(package =>
+            package == id || ReadSelector(Path.Combine(packages, package)) is not null).ToHashSet();
+        var publicCommands = PackageShims.PublicCommands(manifests, explicitIds);
+        var dependencyCommands = manifests.Keys.ToDictionary(package => package,
+            package => PackageShims.DependencyCommands(manifests, package));
+        PackageShims.CheckUnmanagedCommands(shims.PublicDirectory, publicCommands.Keys);
+        foreach (var (package, commands) in dependencyCommands)
+        {
+            PackageShims.CheckUnmanagedCommands(shims.DependencyDirectory(package), commands.Keys);
+        }
+
+        using var transaction = new InstallTransaction(scope.Root);
+        var messages = new List<string>();
         foreach (var release in plan)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var destination = Path.Combine(packages, release.Id);
-            var previousSelector = ReadSelector(destination);
-            var selector = release.Id == id ? version : previousSelector;
+            var selector = release.Id == id ? version : ReadSelector(destination);
+            var manifest = JsonSerializer.SerializeToUtf8Bytes(manifests[release.Id]);
+            var dependencies = shims.DependencyDirectory(release.Id);
+            var commands = dependencyCommands[release.Id];
+            shims.Sync(dependencies, commands, transaction);
             var installed = IsInstalled(packages, release);
             if (installed)
             {
-                shims.Publish(release);
-                if (selector is not null && selector != previousSelector)
+                transaction.WriteFile(Path.Combine(destination, ManifestFile), manifest);
+                if (selector is not null)
                 {
-                    WriteSelector(destination, selector);
+                    transaction.WriteFile(Path.Combine(destination, InstallSelector), Encoding.UTF8.GetBytes(selector));
                 }
             }
             else
             {
-                await InstallPackageAsync(release, packages, destination, shims, powerShell, selector, cancellationToken);
+                var staged = await StagePackageAsync(release, transaction.CreateStagingDirectory(release.Id),
+                    commands.Count == 0 ? null : dependencies, powerShell, selector, manifest, cancellationToken);
+                transaction.PublishPackage(staged, destination);
             }
 
-            powerShell = shims.FindPowerShell() ?? powerShell;
+            if (release.Id == "powershell")
+            {
+                powerShell = FindTapkaPowerShell(packages, manifests[release.Id]) ?? systemPowerShell;
+            }
             var name = selector is null or "latest" ? release.Id : $"{release.Id}@{selector}";
-            Console.WriteLine(installed
+            messages.Add(installed
                 ? $"{name} {release.Version} is already installed at \"{destination}\"."
                 : $"Installed {name} {release.Version} at \"{destination}\".");
         }
 
-        var commands = plan.SelectMany(release => release.Commands.Keys).ToArray();
-        if (commands.Length > 0)
+        foreach (var (package, commands) in dependencyCommands)
         {
-            scope.RegisterShims(shims.DirectoryPath, commands);
+            if (!resolved.Contains(package))
+            {
+                shims.Sync(shims.DependencyDirectory(package), commands, transaction);
+            }
+        }
+        shims.Sync(shims.PublicDirectory, publicCommands, transaction);
+        cancellationToken.ThrowIfCancellationRequested();
+        List<string> warnings = publicCommands.Count == 0 ? [] : scope.RegisterShims(shims.PublicDirectory,
+            plan.Where(release => explicitIds.Contains(release.Id)).SelectMany(release => release.Commands.Keys), transaction);
+        transaction.Commit();
+        foreach (var message in messages)
+        {
+            Console.WriteLine(message);
+        }
+        foreach (var warning in warnings)
+        {
+            Console.Error.WriteLine(warning);
         }
     }
 
@@ -101,19 +145,30 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         return File.Exists(path) ? File.ReadAllText(path) : null;
     }
 
-    private static void WriteSelector(string destination, string selector)
+    private static Dictionary<string, PackageManifest> ReadManifests(string packages)
     {
-        var path = Path.Combine(destination, InstallSelector);
-        var temporary = path + ".tmp";
-        try
+        var manifests = new Dictionary<string, PackageManifest>(StringComparer.Ordinal);
+        foreach (var directory in Directory.EnumerateDirectories(packages))
         {
-            File.WriteAllText(temporary, selector);
-            File.Move(temporary, path, overwrite: true);
+            var path = Path.Combine(directory, ManifestFile);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+            try
+            {
+                var manifest = JsonSerializer.Deserialize<PackageManifest>(File.ReadAllBytes(path)) ?? throw new JsonException();
+                var dependencies = manifest.Dependencies.Select(dependency => new PackageDependency(dependency.Id,
+                    new Dictionary<string, string>(dependency.Rename, StringComparer.OrdinalIgnoreCase))).ToArray();
+                manifests.Add(Path.GetFileName(directory), new PackageManifest(dependencies,
+                    new Dictionary<string, string>(manifest.Commands, StringComparer.OrdinalIgnoreCase)));
+            }
+            catch (JsonException error)
+            {
+                throw new IOException($"Invalid package metadata in '{path}'.", error);
+            }
         }
-        finally
-        {
-            File.Delete(temporary);
-        }
+        return manifests;
     }
 
     private static bool IsInstalled(string packages, PackageRelease release)
@@ -147,82 +202,46 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
     }
 
-    private async Task InstallPackageAsync(PackageRelease release, string packages, string destination,
-        PackageShims shims, string? powerShell, string? selector, CancellationToken cancellationToken)
+    private async Task<string> StagePackageAsync(PackageRelease release, string staging, string? dependencies,
+        string? powerShell, string? selector, byte[] manifest, CancellationToken cancellationToken)
     {
-        // Stage beside the package so publishing and restoring it are same-volume renames.
-        var staging = Directory.CreateDirectory(Path.Combine(packages, $".{release.Id}-{Guid.NewGuid():N}")).FullName;
-        var previous = Path.Combine(staging, "previous");
-        var completed = false;
-        try
+        var installerDirectory = Directory.CreateDirectory(Path.Combine(staging, "download")).FullName;
+        var installer = Path.Combine(installerDirectory, PackageRepository.GetDownloadFilename(release.DownloadUrl));
+        var stagedPackage = Directory.CreateDirectory(Path.Combine(staging, "package")).FullName;
+        await DownloadAsync(release, installer, cancellationToken);
+        if (release.Script is null)
         {
-            var installerDirectory = Directory.CreateDirectory(Path.Combine(staging, "download")).FullName;
-            var installer = Path.Combine(installerDirectory, PackageRepository.GetDownloadFilename(release.DownloadUrl));
-            var stagedPackage = Directory.CreateDirectory(Path.Combine(staging, "package")).FullName;
-            await DownloadAsync(release, installer, cancellationToken);
-
-            if (release.Script is null)
-            {
-                ZipFile.ExtractToDirectory(installer, stagedPackage);
-            }
-            else
-            {
-                var script = Path.Combine(staging, "install.ps1");
-                await File.WriteAllBytesAsync(script, await repository.ReadScriptAsync(release, cancellationToken), cancellationToken);
-                await RunScriptAsync(powerShell!, script, installer, stagedPackage, shims.DirectoryPath, cancellationToken);
-            }
-
-            foreach (var (command, target) in release.Commands)
-            {
-                if (!File.Exists(Path.Combine(stagedPackage, target)))
-                {
-                    throw new IOException($"Package '{release.Id}' did not provide '{target}' for '{command}'.");
-                }
-            }
-
-            await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallMarker), release.Version, cancellationToken);
-            if (selector is not null)
-            {
-                await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallSelector), selector, cancellationToken);
-            }
-            cancellationToken.ThrowIfCancellationRequested();
-            if (Directory.Exists(destination))
-            {
-                Directory.Move(destination, previous);
-            }
-
-            var published = false;
-            try
-            {
-                Directory.Move(stagedPackage, destination);
-                published = true;
-                shims.Publish(release);
-            }
-            catch
-            {
-                if (published)
-                {
-                    Directory.Move(destination, stagedPackage);
-                }
-
-                if (Directory.Exists(previous))
-                {
-                    Directory.Move(previous, destination);
-                }
-
-                throw;
-            }
-
-            completed = true;
+            ZipFile.ExtractToDirectory(installer, stagedPackage);
         }
-        finally
+        else
         {
-            // Keep the backup recoverable if restoring the previous package failed.
-            if (completed || !Directory.Exists(previous))
+            var script = Path.Combine(staging, "install.ps1");
+            await File.WriteAllBytesAsync(script, await repository.ReadScriptAsync(release, cancellationToken), cancellationToken);
+            await RunScriptAsync(powerShell ?? throw new IOException("An existing PowerShell 7 installation is required."),
+                script, installer, stagedPackage, dependencies, cancellationToken);
+        }
+
+        foreach (var (command, target) in release.Commands)
+        {
+            if (!File.Exists(Path.Combine(stagedPackage, target)))
             {
-                Cleanup(staging);
+                throw new IOException($"Package '{release.Id}' did not provide '{target}' for '{command}'.");
             }
         }
+
+        await File.WriteAllTextAsync(Path.Combine(stagedPackage, InstallMarker), release.Version, cancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(stagedPackage, ManifestFile), manifest, cancellationToken);
+        var selectorPath = Path.Combine(stagedPackage, InstallSelector);
+        if (selector is null)
+        {
+            File.Delete(selectorPath);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(selectorPath, selector, cancellationToken);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return stagedPackage;
     }
 
     private async Task DownloadAsync(PackageRelease release, string installer, CancellationToken cancellationToken)
@@ -258,7 +277,17 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         }
     }
 
-    private static string? FindSystemPowerShell()
+    private static string? FindTapkaPowerShell(string packages, PackageManifest? manifest)
+    {
+        if (manifest?.Commands.GetValueOrDefault("pwsh.exe") is not { } target)
+        {
+            return null;
+        }
+        var path = Path.Combine(packages, "powershell", target);
+        return File.Exists(path) ? path : null;
+    }
+
+    public static string? FindSystemPowerShell()
     {
         foreach (var entry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
         {
@@ -275,7 +304,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     }
 
     private static async Task RunScriptAsync(string powerShell, string script, string installer, string destination,
-        string shims, CancellationToken cancellationToken)
+        string? dependencies, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo(powerShell)
         {
@@ -289,7 +318,11 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             start.ArgumentList.Add(argument);
         }
 
-        start.Environment["PATH"] = shims + ";" + Environment.GetEnvironmentVariable("PATH");
+        if (dependencies is not null)
+        {
+            var inheritedPath = Environment.GetEnvironmentVariable("PATH");
+            start.Environment["PATH"] = string.IsNullOrEmpty(inheritedPath) ? dependencies : $"{dependencies};{inheritedPath}";
+        }
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(5));
@@ -317,21 +350,6 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         if (process.ExitCode != 0)
         {
             throw new IOException($"The PowerShell installation script failed (exit code {process.ExitCode}).");
-        }
-    }
-
-    private static void Cleanup(string staging)
-    {
-        try
-        {
-            if (Directory.Exists(staging))
-            {
-                Directory.Delete(staging, recursive: true);
-            }
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            Console.Error.WriteLine($"tapka: could not clean up \"{staging}\": {error.Message}");
         }
     }
 }

@@ -44,8 +44,8 @@ install.SetAction(async (parseResult, cancellationToken) =>
 #endif
         using var http = new HttpClient();
         var repository = new PackageRepository(http, parseResult.GetValue(source) ?? PackageRepository.DefaultSource);
-        await new PackageInstaller(scope, repository, http).InstallAsync(packageReference[0].ToLowerInvariant(),
-            requestedVersion, architecture, cancellationToken);
+        var installer = new PackageInstaller(scope, repository, http, PackageInstaller.FindSystemPowerShell());
+        await installer.InstallAsync(packageReference[0].ToLowerInvariant(), requestedVersion, architecture, cancellationToken);
         return 0;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

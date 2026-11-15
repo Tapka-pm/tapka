@@ -2,7 +2,10 @@ using System.Text;
 
 namespace Tapka;
 
-internal sealed class PackageShims(string directory)
+internal sealed record PackageManifest(PackageDependency[] Dependencies, Dictionary<string, string> Commands);
+internal sealed record ShimTarget(string Package, string Executable);
+
+internal sealed class PackageShims(string root)
 {
     private const string TargetSuffix = ".target";
     private readonly Lazy<byte[]> shim = new(() =>
@@ -14,135 +17,128 @@ internal sealed class PackageShims(string directory)
         return buffer.ToArray();
     });
 
-    public string DirectoryPath => directory;
+    public string PublicDirectory => Path.Combine(root, "shims", "public");
+    public string DependencyDirectory(string id) => Path.Combine(root, "shims", "deps", id);
 
-    public string? FindPowerShell()
+    public static Dictionary<string, ShimTarget> PublicCommands(
+        IReadOnlyDictionary<string, PackageManifest> packages, IEnumerable<string> explicitIds)
     {
-        var target = ReadTarget("pwsh.exe");
-        if (target is null || Owner(target) != "powershell")
+        var commands = new Dictionary<string, ShimTarget>(StringComparer.OrdinalIgnoreCase);
+        foreach (var id in explicitIds)
         {
-            return null;
+            foreach (var (name, executable) in packages[id].Commands)
+            {
+                AddCommand(commands, name, new ShimTarget(id, executable), "the public PATH");
+            }
         }
-
-        var path = Path.Combine(Path.GetDirectoryName(directory)!, "packages", target);
-        return File.Exists(path) ? path : null;
+        return commands;
     }
 
-    public void CheckConflicts(IEnumerable<PackageRelease> plan, string packages)
+    public static Dictionary<string, ShimTarget> DependencyCommands(
+        IReadOnlyDictionary<string, PackageManifest> packages, string consumer)
     {
-        var owners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var release in plan)
-        {
-            foreach (var command in release.Commands.Keys)
-            {
-                var target = ReadTarget(command);
-                var existingOwner = target is null ? null : Owner(target);
-                if (existingOwner is null && command.Equals("git.exe", StringComparison.OrdinalIgnoreCase) &&
-                    File.Exists(Path.Combine(packages, "git", ".tapka-version")))
-                {
-                    // The original Git-only client shipped a shim with its target built in.
-                    existingOwner = "git";
-                }
+        var direct = packages[consumer].Dependencies.ToDictionary(dependency => dependency.Id);
+        var commands = new Dictionary<string, ShimTarget>(StringComparer.OrdinalIgnoreCase);
+        var visiting = new HashSet<string>(StringComparer.Ordinal) { consumer };
+        var visited = new HashSet<string>(StringComparer.Ordinal);
 
-                if ((existingOwner is not null && existingOwner != release.Id) ||
-                    (existingOwner is null && File.Exists(Path.Combine(directory, command))) ||
-                    !owners.TryAdd(command, release.Id))
+        void AddDependency(string id)
+        {
+            if (visiting.Contains(id))
+            {
+                throw new IOException($"Dependency cycle at package '{id}'.");
+            }
+            if (!visited.Add(id))
+            {
+                return;
+            }
+            if (!packages.TryGetValue(id, out var package))
+            {
+                throw new IOException($"Missing dependency '{id}' for '{consumer}'.");
+            }
+
+            var rename = direct.GetValueOrDefault(id)?.Rename;
+            if (rename is not null)
+            {
+                foreach (var original in rename.Keys)
                 {
-                    throw new IOException($"Command '{command}' for '{release.Id}' conflicts with an existing command.");
+                    if (!package.Commands.ContainsKey(original))
+                    {
+                        throw new IOException($"Cannot rename command '{original}': dependency '{id}' of '{consumer}' does not provide it.");
+                    }
                 }
+            }
+            foreach (var (original, executable) in package.Commands)
+            {
+                var name = rename?.GetValueOrDefault(original) ?? original;
+                AddCommand(commands, name, new ShimTarget(id, executable), $"dependencies of '{consumer}'");
+            }
+
+            visiting.Add(id);
+            foreach (var dependency in package.Dependencies)
+            {
+                AddDependency(dependency.Id);
+            }
+            visiting.Remove(id);
+        }
+
+        foreach (var id in direct.Keys)
+        {
+            AddDependency(id);
+        }
+        return commands;
+    }
+
+    public static void CheckUnmanagedCommands(string directory, IEnumerable<string> commands)
+    {
+        foreach (var command in commands)
+        {
+            var path = Path.Combine(directory, command);
+            if (File.Exists(path) && !File.Exists(path + TargetSuffix))
+            {
+                throw new IOException($"Command '{command}' conflicts with an existing executable in '{directory}'.");
             }
         }
     }
 
-    public void Publish(PackageRelease release)
+    public void Sync(string directory, IReadOnlyDictionary<string, ShimTarget> commands, InstallTransaction transaction)
     {
-        var changes = new List<(string Path, byte[]? Before, byte[]? After)>();
-        void AddChange(string path, byte[]? contents)
+        if (commands.Count > 0)
         {
-            var previous = File.Exists(path) ? File.ReadAllBytes(path) : null;
-            if ((previous is null) != (contents is null) || !previous.AsSpan().SequenceEqual(contents))
-            {
-                changes.Add((path, previous, contents));
-            }
-        }
-
-        if (release.Commands.Count > 0)
-        {
-            Directory.CreateDirectory(directory);
-            foreach (var (command, target) in release.Commands)
+            transaction.EnsureDirectory(directory);
+            foreach (var (command, target) in commands)
             {
                 var executable = Path.Combine(directory, command);
-                AddChange(executable + TargetSuffix, Encoding.Unicode.GetBytes(Path.Combine(release.Id, target)));
-                AddChange(executable, shim.Value);
+                var targetPath = Path.Combine(root, "packages", target.Package, target.Executable);
+                // Two NUL-terminated UTF-16 strings let the same launcher work at either depth.
+                var metadata = Encoding.Unicode.GetBytes(targetPath + "\0" + DependencyDirectory(target.Package) + "\0");
+                transaction.WriteFile(executable + TargetSuffix, metadata);
+                transaction.WriteFile(executable, shim.Value);
             }
         }
 
-        if (Directory.Exists(directory))
+        if (!Directory.Exists(directory))
         {
-            foreach (var path in Directory.EnumerateFiles(directory, "*.exe" + TargetSuffix))
-            {
-                var command = Path.GetFileName(path)[..^TargetSuffix.Length];
-                if (!release.Commands.ContainsKey(command) && Owner(File.ReadAllText(path, Encoding.Unicode)) == release.Id)
-                {
-                    AddChange(Path.Combine(directory, command), null);
-                    AddChange(path, null);
-                }
-            }
-        }
-
-        var applied = 0;
-        try
-        {
-            foreach (var (path, _, after) in changes)
-            {
-                Update(path, after);
-                applied++;
-            }
-        }
-        catch
-        {
-            for (var index = applied - 1; index >= 0; index--)
-            {
-                var (path, before, _) = changes[index];
-                try
-                {
-                    Update(path, before);
-                }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-                {
-                    Console.Error.WriteLine($"tapka: could not restore \"{path}\": {error.Message}");
-                }
-            }
-
-            throw;
-        }
-    }
-
-    private string? ReadTarget(string command)
-    {
-        var path = Path.Combine(directory, command + TargetSuffix);
-        return File.Exists(path) ? File.ReadAllText(path, Encoding.Unicode) : null;
-    }
-
-    private static string Owner(string target) => target.Split('\\', 2)[0];
-
-    private static void Update(string path, byte[]? contents)
-    {
-        if (contents is null)
-        {
-            File.Delete(path);
             return;
         }
-
-        var temporary = Path.Combine(Path.GetDirectoryName(path)!, $".{Guid.NewGuid():N}.tmp");
-        try
+        foreach (var path in Directory.GetFiles(directory, "*.exe" + TargetSuffix))
         {
-            File.WriteAllBytes(temporary, contents);
-            File.Move(temporary, path, overwrite: true);
+            var filename = Path.GetFileName(path)[..^TargetSuffix.Length];
+            if (!commands.ContainsKey(filename))
+            {
+                transaction.WriteFile(Path.Combine(directory, filename), null);
+                transaction.WriteFile(path, null);
+            }
         }
-        finally
+        transaction.RemoveEmptyDirectory(directory);
+    }
+
+    private static void AddCommand(Dictionary<string, ShimTarget> commands, string name, ShimTarget target, string scope)
+    {
+        if (!commands.TryAdd(name, target))
         {
-            File.Delete(temporary);
+            throw new IOException(
+                $"Command '{name}' in {scope} is provided by both '{commands[name].Package}' and '{target.Package}'.");
         }
     }
 }

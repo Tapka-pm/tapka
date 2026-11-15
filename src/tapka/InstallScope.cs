@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
 
 namespace Tapka;
@@ -47,57 +48,56 @@ internal sealed class InstallScope(string root, bool isTest)
 #endif
     }
 
-    public void RegisterShims(string shims, IEnumerable<string> commands)
+    public List<string> RegisterShims(string shims, IEnumerable<string> commands, InstallTransaction transaction)
     {
-        string updatedPath;
-        string? precedingPath;
         if (isTest)
         {
             var pathFile = Path.Combine(Root, "user-path.txt");
             var currentPath = File.Exists(pathFile) ? File.ReadAllText(pathFile) : "";
-            updatedPath = AddShims(currentPath, shims);
+            var updatedPath = AddShims(currentPath, shims);
+            var warnings = GetWarnings(Environment.GetEnvironmentVariable("Path"), updatedPath, shims, commands);
             if (currentPath != updatedPath)
             {
-                File.WriteAllText(pathFile, updatedPath);
+                transaction.WriteFile(pathFile, Encoding.UTF8.GetBytes(updatedPath));
             }
 
-            precedingPath = Environment.GetEnvironmentVariable("Path");
+            return warnings;
         }
-        else
+
+        using var environment = Registry.CurrentUser.CreateSubKey("Environment", writable: true);
+        var value = environment.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+        var userPath = value switch
         {
-            using var environment = Registry.CurrentUser.CreateSubKey("Environment", writable: true);
-            var value = environment.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-            var currentPath = value switch
-            {
-                null => "",
-                string path => path,
-                _ => throw new InvalidOperationException("The user PATH has an unsupported registry value type.")
-            };
-            var kind = value is null ? RegistryValueKind.ExpandString : environment.GetValueKind("Path");
-            var expandVariables = kind == RegistryValueKind.ExpandString;
-            updatedPath = AddShims(currentPath, shims, expandVariables);
-            if (currentPath != updatedPath)
-            {
-                environment.SetValue("Path", updatedPath, kind);
-                SendMessageTimeout(BroadcastWindow, SettingChange, UIntPtr.Zero, "Environment", AbortIfHung, 1000, out _);
-            }
-
-            if (expandVariables)
-            {
-                updatedPath = Environment.ExpandEnvironmentVariables(updatedPath);
-            }
-
-            precedingPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine);
+            null => "",
+            string path => path,
+            _ => throw new InvalidOperationException("The user PATH has an unsupported registry value type.")
+        };
+        var kind = value is null ? RegistryValueKind.ExpandString : environment.GetValueKind("Path");
+        var expandVariables = kind == RegistryValueKind.ExpandString;
+        var updatedUserPath = AddShims(userPath, shims, expandVariables);
+        var effectivePath = expandVariables ? Environment.ExpandEnvironmentVariables(updatedUserPath) : updatedUserPath;
+        var userWarnings = GetWarnings(Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine),
+            effectivePath, shims, commands);
+        if (userPath != updatedUserPath)
+        {
+            environment.SetValue("Path", updatedUserPath, kind);
+            SendMessageTimeout(BroadcastWindow, SettingChange, UIntPtr.Zero, "Environment", AbortIfHung, 1000, out _);
         }
+        return userWarnings;
+    }
 
+    private static List<string> GetWarnings(string? precedingPath, string updatedPath, string shims, IEnumerable<string> commands)
+    {
+        var warnings = new List<string>();
         foreach (var command in commands)
         {
             var resolved = FindCommand(precedingPath + ";" + updatedPath, command);
             if (resolved is not null && !resolved.Equals(Path.Combine(shims, command), StringComparison.OrdinalIgnoreCase))
             {
-                Console.Error.WriteLine($"tapka: warning: PATH resolves {command} to \"{resolved}\" before the tapka shim.");
+                warnings.Add($"tapka: warning: PATH resolves {command} to \"{resolved}\" before the tapka shim.");
             }
         }
+        return warnings;
     }
 
     private static string AddShims(string currentPath, string shims, bool expandVariables = false)

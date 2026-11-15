@@ -114,3 +114,6 @@ try {
         Remove-Item -LiteralPath $work -Recurse -Force
     }
 }
+
+# The expected checksum rejection leaves the native exit code at 1.
+exit 0

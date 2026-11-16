@@ -10,7 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Tapka.Terminal.Testing/Tapka.Terminal.Testing.csproj" />
-    <ProjectReference Include="../../src/tapka-progress/tapka-progress.csproj" />
+    <ProjectReference Include="../../src/Tapka.Progress/Tapka.Progress.csproj" />
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
     <Compile Include="../../src/tapka/*.cs" Exclude="../../src/tapka/Program.cs" />
     <EmbeddedResource Include="$(ShimPath)" LogicalName="tapka.shim.exe" />

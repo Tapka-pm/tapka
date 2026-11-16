@@ -11,7 +11,8 @@ internal sealed class CatalogCache(InstallScope scope, HttpClient http, ITermina
 {
     private const long MaxCatalogBytes = 128 * 1024 * 1024;
 
-    public async Task<PackageRepository> OpenAsync(string source, bool force, CancellationToken cancellationToken)
+    public async Task<PackageRepository> OpenAsync(string source, bool force, CancellationToken cancellationToken,
+        ITerminal? output = null)
     {
         var repository = new PackageRepository(http, source);
         var identity = repository.ArchiveUrl is null ? repository.Source.ToUpperInvariant() : repository.Source;
@@ -58,7 +59,7 @@ internal sealed class CatalogCache(InstallScope scope, HttpClient http, ITermina
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, pointer, overwrite: true);
             published = true;
-            terminal.Out.WriteLine($"Updated catalog '{repository.Source}'.");
+            (output ?? terminal).Out.WriteLine($"Updated catalog '{repository.Source}'.");
             return new PackageRepository(http, repository.Source, next);
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or InvalidDataException or IOException)

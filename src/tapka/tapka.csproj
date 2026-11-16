@@ -13,7 +13,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Tapka.Terminal/Tapka.Terminal.csproj" />
-    <ProjectReference Include="../tapka-progress/tapka-progress.csproj" />
+    <ProjectReference Include="../Tapka.Progress/Tapka.Progress.csproj" />
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
   </ItemGroup>
   <PropertyGroup>

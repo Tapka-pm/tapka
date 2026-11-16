@@ -15,7 +15,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Tapka.Terminal/Tapka.Terminal.csproj" />
-    <ProjectReference Include="../tapka-progress/tapka-progress.csproj" />
+    <ProjectReference Include="../Tapka.Progress/Tapka.Progress.csproj" />
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
     <Compile Include="../tapka/*.cs" Exclude="../tapka/Program.cs;../tapka/TapkaCli.cs;../tapka/InventoryCommands.cs" />
     <AssemblyMetadata Include="TapkaVersion" Value="$(Version)" />

@@ -177,7 +177,7 @@ internal static class UpgradeTests
         File.Delete(Fixture("demo", "1"));
         File.Delete(Fixture("dep", "1"));
         var all = await Command("upgrade");
-        Check(all.Contains("pinned 1 - Pinned"), "A pin was not reported.");
+        Check(all.Contains("pinned 1 - Installed (Pinned)"), "A pin was not reported.");
         await CheckPath("demo", "1");
         await CheckPath("dep", "1");
         await CheckPath("other", "2");

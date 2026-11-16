@@ -83,36 +83,35 @@ tapka install git --repository ..\packages
 
 ## Отображение прогресса
 
-Библиотека `src/tapka-progress` отвечает за дерево прогресса в `install`, `upgrade` и установщике. В терминале строки обновляются на месте:
+Библиотека `src/Tapka.Progress` отображает дерево зависимостей в `install`, `upgrade` и установщике. В интерактивном терминале строки обновляются на месте.
 
 ```text
-[.] app 2 - Waiting - [----------------]
-|- [/] dep1 1 - Downloading (524,288 bytes) - [########--------] 50%
-`- [+] dep2 3 - Pinned - [################] 100%
+[.] app 2 - Awaiting
+|- [>] dep1 1 - Downloading (524,288 bytes) - [########--------] 50%
+|- [>] dep2 3 - Installing (Extracting) - [-->-------------]
+`- [+] dep3 1 - Installed (Pinned)
 ```
 
-Процент относится к текущей стадии скачивания и вычисляется по `Content-Length`. Если размер неизвестен, а также при проверке хеша, распаковке и запуске скрипта, отображается анимированный индикатор без процента. После подготовки пакет ожидает фиксации транзакции; только затем получает статус `Installed` или `Updated`. При ошибке или отмене незавершённые строки сохраняют соответствующий статус и название стадии.
+Новый пакет проходит стадии `Awaiting` → `Downloading` → `Downloaded` → `Installing` → `Installed`. Процент скачивания вычисляется по `Content-Length`. Если размер неизвестен, а также при проверке хеша и установке, полоса движется без процента. Пакет получает статус `Downloaded` после проверки хеша и `Installed` после фиксации установки.
 
-Общие зависимости имеют единое состояние и показываются у каждого родителя; повторное поддерево помечается `(shared)`. Служебные зависимости, включая PowerShell и распаковщики, тоже входят в дерево. Длинные строки обрезаются по ширине терминала, большое дерево ограничивается высотой окна; при завершении выводится полное дерево. Диагностика скриптов печатается над обновляемой областью. В файле, pipe и при `TERM=dumb` выводится итоговое дерево без ANSI-кодов и промежуточных кадров.
-
-Публичный API библиотеки принимает `ITerminal`. Клиент передаёт `SystemTerminal`, а тесты могут передать `TerminalTestConsole`.
+Общая зависимость представлена одним объектом `Dep`. Она видна у каждого родителя, а её поддерево раскрывается один раз. Повторные ссылки помечаются `(shared)`. Живые кадры ограничены размерами терминала, полное дерево печатается по завершении. При перенаправлении вывода и при `TERM=dumb` печатается только итоговое дерево и сообщения диагностики. При ошибке или отмене незавершённые строки помечаются `Aborted` или `Cancelled` с указанием текущей стадии.
 
 ```csharp
 using Tapka.Progress;
 using Tapka.Terminal;
 
-ITerminal terminal = new SystemTerminal();
-using var progress = new ProgressTree(terminal, token);
-progress.Add("app");
-progress.Add("dependency", parentId: "app");
-progress.Report("dependency", "Downloading", fraction: 0.5);
-progress.Report("dependency", "Installed", state: ProgressState.Completed);
-progress.Report("app", "Installed", state: ProgressState.Completed);
+var app = new Dep { Name = "app" };
+var dependency = new Dep { Name = "dependency" };
+app.Add(dependency);
+
+await Dep.RunAsync(new SystemTerminal(), [app],
+    output => InstallAsync(app, dependency, output, cancellationToken),
+    cancellationToken);
 ```
 
-`Report` безопасен для параллельных вызовов. `WriteLine` пишет диагностику в stdout, а `WriteErrorLine` — в stderr. `Pause` временно передаёт терминал внешнему компоненту, `Snapshot` возвращает текст дерева. При `IsInteractive == false` прогресс пишет только итоговое дерево и диагностику. `Dispose` останавливает перерисовку, помечает незавершённые узлы как прерванные и выводит итог.
+Внутри операции зависимости можно добавлять через `Add` и обновлять через `SetStatus`. Например, `dependency.SetStatus(DepStatus.Downloading, fraction: 0.5)` показывает 50% скачивания. Сообщения в `output.Out` и `output.Error` печатаются над деревом. `Dep.RunAsync` завершает перерисовку и печатает итог при выходе из операции.
 
-Тесты библиотеки запускаются отдельно командой `dotnet test src/tapka-progress/Tests` из каталога клиента; нужны .NET 11 SDK и Windows x64. Они используют `Tapka.Terminal.Testing` для проверки итогового экрана и ANSI-перерисовки. Кадры запускаются вручную с фиксированными размерами терминала, без ожидания таймера. Inline-снимки по умолчанию только проверяются. Для явного обновления задайте `INLINESNAPSHOTTESTING_STRATEGY=OverwriteWithoutFailure`, запустите тесты, удалите переменную, просмотрите `git diff` и повторите запуск в обычном режиме. Подробнее — в [README Tapka.Terminal.Testing](src/Tapka.Terminal.Testing/README.md#run-tests-and-update-inline-snapshots).
+Тесты запускаются командой `dotnet test src/Tapka.Progress/Tests` из каталога клиента с .NET 11 SDK на Windows x64. Они проверяют итоговый экран и ANSI-перерисовку через `Tapka.Terminal.Testing`. Для обновления снимков используйте [инструкцию Tapka.Terminal.Testing](src/Tapka.Terminal.Testing/README.md#run-tests-and-update-inline-snapshots).
 
 ## Обновление каталога и пакетов
 

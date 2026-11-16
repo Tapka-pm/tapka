@@ -111,7 +111,7 @@ public sealed class ProgressTests
             |  `- [>] child - Downloading - [############----] 75%
             `- [.] right - Awaiting
                `- [>] child - Downloading - [############----] 75% (shared)
-            """, console.GetScreenText());
+            """.ReplaceLineEndings("\n"), console.GetScreenText());
         Assert.False(clock.HasPendingFrame);
 
         clock.Advance(TimeSpan.FromSeconds(1));

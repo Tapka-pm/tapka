@@ -1,9 +1,11 @@
 using System.Text;
+using System.Text.Json;
 
 namespace Tapka;
 
 internal sealed record PackageManifest(PackageDependency[] Dependencies, Dictionary<string, string> Commands);
 internal sealed record ShimTarget(string Package, string Executable, string DotNetRoot);
+internal sealed record ShimGenerationPackage(string Id, string Version, string Path, string[] Dependencies);
 
 internal sealed class PackageShims(string root)
 {
@@ -19,12 +21,24 @@ internal sealed class PackageShims(string root)
     public string PublicDirectory => Path.Combine(root, "shims", "public");
     public string GenerationDirectory(string generation) => Path.Combine(root, "shims", "generations", generation);
     public string DependencyDirectory(string generation, string id) => Path.Combine(GenerationDirectory(generation), "deps", id);
+    public const string GenerationPackagesFile = "packages.json";
     private string Pointer => Path.Combine(root, ShimBinary.ActivePointer);
 
     public Task<FileStream> LockPublicationAsync(CancellationToken token) => InstallScope.AcquireLockAsync(
         Path.Combine(root, "shims", "activation.lock"), TimeSpan.FromSeconds(10), token);
 
     public string? ActiveGeneration => File.Exists(Pointer) ? File.ReadAllText(Pointer) : null;
+
+    public void WriteGenerationPackages(string generation, IReadOnlyDictionary<string, InstalledPackage> packages,
+        IReadOnlyDictionary<string, PackageManifest> manifests, InstallTransaction transaction)
+    {
+        var directory = GenerationDirectory(generation);
+        var graph = packages.Values.Select(package => new ShimGenerationPackage(package.Id, package.Version,
+            package.PackagePath, manifests[package.Id].Dependencies.Select(dependency => dependency.Id).ToArray())).ToArray();
+        transaction.EnsureDirectory(directory);
+        transaction.WriteFile(Path.Combine(directory, GenerationPackagesFile),
+            JsonSerializer.SerializeToUtf8Bytes(graph, PackageJsonContext.Default.ShimGenerationPackageArray));
+    }
 
     public bool HasPublicGeneration(IEnumerable<string> names) =>
         ActiveGeneration is { } generation && Guid.TryParseExact(generation, "N", out _) &&
@@ -117,6 +131,8 @@ internal sealed class PackageShims(string root)
         IReadOnlyDictionary<string, InstalledPackage> packages, InstallTransaction transaction)
     {
         if (commands.Count == 0) return;
+        // The activation lock also lives here and survives a rolled-back publication.
+        Directory.CreateDirectory(Path.GetDirectoryName(Pointer)!);
         var directory = DependencyDirectory(generation, id);
         transaction.EnsureDirectory(directory);
         foreach (var (command, target) in commands)

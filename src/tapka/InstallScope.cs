@@ -1,16 +1,14 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Tapka;
 
 internal sealed class InstallScope(string root, bool isTest)
 {
-    private static readonly IntPtr BroadcastWindow = new(0xffff);
-    private const uint SettingChange = 0x001a;
-    private const uint AbortIfHung = 0x0002;
-
     public string Root { get; } = root;
     public string PackagesDirectory => Path.Combine(Root, "packages");
 
@@ -131,8 +129,14 @@ internal sealed class InstallScope(string root, bool isTest)
         return userWarnings;
     }
 
-    private static void BroadcastEnvironmentChange() =>
-        SendMessageTimeout(BroadcastWindow, SettingChange, UIntPtr.Zero, "Environment", AbortIfHung, 1000, out _);
+    private static unsafe void BroadcastEnvironmentChange()
+    {
+        fixed (char* setting = "Environment")
+        {
+            PInvoke.SendMessageTimeout(HWND.HWND_BROADCAST, PInvoke.WM_SETTINGCHANGE, default, (LPARAM)(nint)setting,
+                SEND_MESSAGE_TIMEOUT_FLAGS.SMTO_ABORTIFHUNG, 1000);
+        }
+    }
 
     private static List<string> GetWarnings(string? precedingPath, string updatedPath, string shims, IEnumerable<string> commands)
     {
@@ -203,8 +207,4 @@ internal sealed class InstallScope(string root, bool isTest)
             return null;
         }
     }
-
-    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    private static extern IntPtr SendMessageTimeout(
-        IntPtr window, uint message, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
 }

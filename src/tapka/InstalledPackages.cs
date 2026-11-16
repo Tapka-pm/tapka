@@ -24,6 +24,9 @@ internal sealed class InstalledPackages : IDisposable
 
     public static bool Exists(InstallScope scope) => File.Exists(Path.Combine(scope.Root, FileName));
 
+    public static InstalledPackages? OpenSnapshot(InstallScope scope) => Exists(scope)
+        ? OpenExisting(Path.Combine(scope.Root, FileName), SqliteOpenMode.ReadOnly) : null;
+
     private InstalledPackages(string path, SqliteOpenMode mode)
     {
         connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -49,9 +52,9 @@ internal sealed class InstalledPackages : IDisposable
     {
         // Existing registries can be queried while an installation is in progress.
         var path = Path.Combine(scope.Root, FileName);
-        if (File.Exists(path))
+        if (OpenSnapshot(scope) is { } existing)
         {
-            return OpenExisting(path, SqliteOpenMode.ReadOnly);
+            return existing;
         }
 
         using var installLock = await scope.AcquireInstallLockAsync(cancellationToken);
@@ -202,11 +205,70 @@ internal sealed class InstalledPackages : IDisposable
             package_id TEXT NOT NULL, package_version TEXT NOT NULL COLLATE NOCASE,
             tool_id TEXT NOT NULL, tool_version TEXT NOT NULL COLLATE NOCASE,
             PRIMARY KEY (package_id, package_version, tool_id),
-            FOREIGN KEY (package_id, package_version) REFERENCES package_versions(id, version) ON DELETE CASCADE,
-            FOREIGN KEY (tool_id, tool_version) REFERENCES package_versions(id, version)
+            FOREIGN KEY (package_id, package_version) REFERENCES package_versions(id, version) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS installation_tools_reverse ON installation_tools(tool_id, tool_version, package_id);
         """;
+
+    public IReadOnlyList<InstalledPackage> ListVersions()
+    {
+        if (legacySchema) return List();
+        using var command = CreateCommand("""
+            SELECT v.id, v.version, p.selector, v.architecture, v.repository, v.download_url, v.checksum,
+                p.installed_at, p.version_changed_at, coalesce(v.relative_path, p.relative_path)
+            FROM package_versions v LEFT JOIN packages p ON p.id = v.id AND v.version = p.version COLLATE NOCASE
+            ORDER BY v.id, v.version COLLATE NOCASE
+            """);
+        using var reader = command.ExecuteReader();
+        var versions = new List<InstalledPackage>();
+        while (reader.Read()) versions.Add(ReadPackage(reader));
+        return versions;
+    }
+
+    public void CommitCleanup(string batch, IEnumerable<PackageVersion> versions)
+    {
+        using var transaction = BeginWrite();
+        // The tool version is provenance. Only the consumer still needs to exist on disk.
+        using var legacyTools = CreateCommand("""
+            SELECT 1 FROM pragma_foreign_key_list('installation_tools') WHERE "from" = 'tool_id'
+            """, transaction);
+        if (legacyTools.ExecuteScalar() is not null)
+        {
+            Execute("""
+                DROP INDEX IF EXISTS installation_tools_reverse;
+                ALTER TABLE installation_tools RENAME TO previous_installation_tools;
+                """ + InstallationToolsSchema + """
+                INSERT INTO installation_tools SELECT * FROM previous_installation_tools;
+                DROP TABLE previous_installation_tools;
+                """, transaction);
+        }
+        foreach (var version in versions)
+        {
+            Execute("""
+                DELETE FROM packages WHERE id = $id AND version = $version COLLATE NOCASE;
+                DELETE FROM package_versions WHERE id = $id AND version = $version;
+                """, transaction, ("$id", version.Id), ("$version", version.Version));
+        }
+        Execute("""
+            CREATE TABLE IF NOT EXISTS cleanup_commits (batch TEXT PRIMARY KEY NOT NULL);
+            INSERT INTO cleanup_commits VALUES ($batch);
+            """, transaction, ("$batch", batch));
+        transaction.Commit();
+    }
+
+    public bool WasCleanupCommitted(string batch)
+    {
+        using var table = CreateCommand("SELECT 1 FROM sqlite_schema WHERE name = 'cleanup_commits' AND type = 'table'");
+        if (table.ExecuteScalar() is null) return false;
+        using var command = CreateCommand("SELECT 1 FROM cleanup_commits WHERE batch = $batch", null, ("$batch", batch));
+        return command.ExecuteScalar() is not null;
+    }
+
+    public void ForgetCleanup(string batch)
+    {
+        using var command = CreateCommand("DELETE FROM cleanup_commits WHERE batch = $batch", null, ("$batch", batch));
+        command.ExecuteNonQuery();
+    }
 
     public InstalledPackage? FindVersion(string id, string version)
     {

@@ -3,6 +3,8 @@ using System.Text;
 
 namespace Tapka;
 
+internal sealed record ShimSettings(string Target, string Prefix, string Runtime);
+
 internal static class ShimBinary
 {
     // The C marker is padded to 32 bytes. Each field includes its terminator.
@@ -56,6 +58,30 @@ internal static class ShimBinary
         }
         offset = FindSettings(executable, LegacyMarker, 3);
         return offset >= 0 && HasValidSettings(executable, offset);
+    }
+
+    public static ShimSettings? ReadLauncher(ReadOnlySpan<byte> executable)
+    {
+        var offset = FindSettings(executable, Marker, 4);
+        if (offset >= 0 && IsValidField(executable.Slice(offset, FieldSize)))
+            return ReadSettings(executable.Slice(offset + FieldSize, 3 * FieldSize));
+
+        offset = FindSettings(executable, LegacyMarker, 3);
+        return offset >= 0 && HasValidSettings(executable, offset)
+            ? new ShimSettings(ReadField(executable.Slice(offset + FieldSize, FieldSize)),
+                ReadField(executable.Slice(offset + 2 * FieldSize, FieldSize)), "") : null;
+    }
+
+    public static ShimSettings? ReadSettings(ReadOnlySpan<byte> settings) => settings.Length == 3 * FieldSize &&
+        IsValidField(settings[..FieldSize]) && IsValidField(settings.Slice(FieldSize, FieldSize), optional: true) &&
+        IsValidField(settings[(2 * FieldSize)..], optional: true)
+        ? new ShimSettings(ReadField(settings[..FieldSize]), ReadField(settings.Slice(FieldSize, FieldSize)),
+            ReadField(settings[(2 * FieldSize)..])) : null;
+
+    private static string ReadField(ReadOnlySpan<byte> field)
+    {
+        var chars = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, char>(field);
+        return Utf16.GetString(field[..(chars.IndexOf('\0') * sizeof(char))]);
     }
 
     private static bool HasValidSettings(ReadOnlySpan<byte> executable, int offset)

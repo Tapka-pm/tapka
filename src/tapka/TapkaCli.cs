@@ -17,6 +17,7 @@ internal static class TapkaCli
         var upgrade = new Command("upgrade", "Upgrade installed packages using their saved selectors.") { ids };
         var root = new RootCommand("Portable package manager for Windows.") { install, update, upgrade };
         InventoryCommands.AddTo(root, terminal);
+        root.Subcommands.Add(CleanupCommand(terminal));
 
         Configure(install, terminal, async (result, scope, http, cache, source, architecture, powerShell, token) =>
         {
@@ -53,6 +54,41 @@ internal static class TapkaCli
         });
 
         return root.Parse(args).InvokeAsync(new InvocationConfiguration { Output = terminal.Out, Error = terminal.Error });
+    }
+
+    private static Command CleanupCommand(ITerminal terminal)
+    {
+        var dryRun = new Option<bool>("--dry-run") { Description = "Show what would be removed." };
+        var command = new Command("cleanup", "Remove unused package versions and orphaned dependencies.") { dryRun };
+#if TAPKA_TEST_BUILD
+        var testRoot = new Option<string>("--root") { Description = "Absolute test installation directory.", Required = true };
+        command.Options.Add(testRoot);
+#endif
+        command.SetAction(async (result, token) =>
+        {
+            try
+            {
+                if (!OperatingSystem.IsWindows()) throw new InvalidOperationException("Cleanup requires Windows.");
+#if TAPKA_TEST_BUILD
+                var scope = InstallScope.Create(result.GetValue(testRoot));
+#else
+                var scope = InstallScope.Create();
+#endif
+                return await new PackageCleanup(scope, terminal).RunAsync(result.GetValue(dryRun), token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                terminal.Error.WriteLine("tapka: cleanup cancelled.");
+                return 130;
+            }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or
+                InvalidOperationException or SqliteException or ArgumentException or Win32Exception or System.Text.Json.JsonException)
+            {
+                terminal.Error.WriteLine($"tapka: {error.Message}");
+                return 1;
+            }
+        });
+        return command;
     }
 
     private static void Configure(Command command, ITerminal terminal,

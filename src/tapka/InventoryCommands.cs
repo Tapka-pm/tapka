@@ -67,14 +67,15 @@ internal static class InventoryCommands
                 throw new IOException($"Package directory '{directory}' is missing.");
             }
             terminal.Out.WriteLine(directory);
-        });
+        }, needsPackageFiles: true);
 
         root.Subcommands.Add(list);
         root.Subcommands.Add(info);
         root.Subcommands.Add(path);
     }
 
-    private static void Configure(Command command, ITerminal terminal, Action<InstalledPackages, InstallScope, ParseResult> action)
+    private static void Configure(Command command, ITerminal terminal, Action<InstalledPackages, InstallScope, ParseResult> action,
+        bool needsPackageFiles = false)
     {
 #if TAPKA_TEST_BUILD
         var testRoot = new Option<string>("--root") { Description = "Absolute test installation directory.", Required = true };
@@ -89,6 +90,14 @@ internal static class InventoryCommands
 #else
                 var scope = InstallScope.Create();
 #endif
+                if (needsPackageFiles && CleanupJournal.HasPending(scope.Root))
+                {
+                    using var installLock = await scope.AcquireInstallLockAsync(cancellationToken);
+                    using var writable = InstalledPackages.OpenForInstall(scope, cancellationToken);
+                    await CleanupJournal.RecoverAsync(scope, writable, terminal.Error.WriteLine, cancellationToken);
+                    action(writable, scope, result);
+                    return 0;
+                }
                 using var inventory = await InstalledPackages.OpenForReadAsync(scope, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 action(inventory, scope, result);
@@ -99,7 +108,7 @@ internal static class InventoryCommands
                 return 130;
             }
             catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
-                or InvalidOperationException or SqliteException or ArgumentException)
+                or InvalidOperationException or SqliteException or ArgumentException or System.Text.Json.JsonException)
             {
                 terminal.Error.WriteLine($"tapka: {error.Message}");
                 return 1;

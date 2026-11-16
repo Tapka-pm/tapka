@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <Import Project="../InstalledPackages.props" />
+  <Import Project="../Win32.props" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>tapka-setup-win-x64</AssemblyName>

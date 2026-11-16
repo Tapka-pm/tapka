@@ -21,6 +21,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     {
         using var installLock = await scope.AcquireInstallLockAsync(cancellationToken);
         using var inventory = InstalledPackages.OpenForInstall(scope, cancellationToken);
+        if (CleanupJournal.HasPending(scope.Root))
+            await CleanupJournal.RecoverAsync(scope, inventory, terminal.Error.WriteLine, cancellationToken);
         Directory.CreateDirectory(scope.PackagesDirectory);
         var upgrade = version is null;
         var installed = inventory.List().ToDictionary(package => package.Id);
@@ -262,6 +264,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 try
                 {
                     shims.PreparePublic(generation, publicCommands, dependencyCommands, selected, transaction);
+                    shims.WriteGenerationPackages(generation, selected, manifests, transaction);
                     using var database = inventory.BeginWrite();
                     foreach (var package in changes)
                     {

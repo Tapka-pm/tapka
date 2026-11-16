@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using Tapka;
 using Tapka.Terminal;
+using Windows.Win32;
 
 return await SetupCli.RunAsync(args, new SystemTerminal(), Pause);
 
@@ -100,8 +101,5 @@ internal static class SetupCli
 
 internal static class SetupConsole
 {
-    internal static bool IsOnlyProcess() => GetConsoleProcessList(out _, 1) == 1;
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern uint GetConsoleProcessList(out uint processId, uint processCount);
+    internal static bool IsOnlyProcess() => PInvoke.GetConsoleProcessList(stackalloc uint[1]) == 1;
 }

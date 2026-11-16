@@ -74,16 +74,18 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
 
             async Task ResolveAsync(string id, string? requestedVersion, string? parentSource, Dep? parent = null)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var alreadyResolved = resolved.Contains(id);
+                if (!alreadyResolved && !visiting.Add(id)) throw new IOException($"Dependency cycle at package '{id}'.");
+
                 if (!deps.TryGetValue(id, out var dep))
                 {
                     dep = new Dep { Name = id };
                     deps.Add(id, dep);
                 }
                 parent?.Add(dep);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (resolved.Contains(id)) return;
+                if (alreadyResolved) return;
                 dep.SetStatus(DepStatus.Awaiting, detail: "Resolving");
-                if (!visiting.Add(id)) throw new IOException($"Dependency cycle at package '{id}'.");
 
                 var previous = installed.GetValueOrDefault(id);
                 var source = upgrade ? sourceOverride ?? previous?.Repository ?? (previous is null ? parentSource : null)

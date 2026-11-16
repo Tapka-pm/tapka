@@ -6,11 +6,119 @@ namespace Tapka.Progress.Tests;
 
 public sealed class ProgressTests
 {
+    private static readonly TimeSpan FrameInterval = TimeSpan.FromMilliseconds(200);
+
     private sealed record PlainTerminal(TextWriter Out, TextWriter Error) : ITerminal
     {
         public int Width => 80;
         public int Height => 24;
         public bool IsInteractive => false;
+    }
+
+    private static ProgressDisplay StartDisplay(ITerminal terminal, out ManualTimeProvider clock, params Dep[] roots)
+    {
+        clock = new ManualTimeProvider();
+        var display = new ProgressDisplay(terminal, roots, clock);
+        display.Start();
+        clock.Advance(TimeSpan.Zero);
+        return display;
+    }
+
+    [Fact]
+    public void Updates_bubble_from_new_descendants_and_skip_unchanged_state()
+    {
+        var root = new Dep();
+        var branch = new Dep();
+        var leaf = new Dep();
+        root.Add(branch);
+        var updates = new List<Dep>();
+        foreach (var node in new[] { root, branch, leaf })
+        {
+            node.Update += (sender, _) =>
+            {
+                Assert.Same(node, sender);
+                updates.Add(node);
+            };
+        }
+
+        branch.Add(leaf);
+        Assert.Equal(2, updates.Count);
+        Assert.Contains(branch, updates);
+        Assert.Contains(root, updates);
+        updates.Clear();
+
+        leaf.Name = "leaf";
+        leaf.SetStatus(DepStatus.Downloading);
+        leaf.SetStatus(DepStatus.Downloading, .5);
+        leaf.SetStatus(DepStatus.Downloading, .5, "Downloading archive");
+        branch.Add(leaf);
+        leaf.Name = "leaf";
+        leaf.SetStatus(DepStatus.Downloading, .5, "Downloading archive");
+
+        Assert.Equal(12, updates.Count);
+        Assert.All(new[] { leaf, branch, root }, node => Assert.Equal(4, updates.Count(dep => dep == node)));
+    }
+
+    [Fact]
+    public void Reentrant_updates_reach_the_parent()
+    {
+        var root = new Dep();
+        var child = new Dep();
+        root.Add(child);
+        var updates = 0;
+        root.Update += (_, _) => updates++;
+        child.Update += (_, _) =>
+        {
+            if (child.Status == DepStatus.Downloading) child.SetStatus(DepStatus.Installed);
+        };
+
+        child.SetStatus(DepStatus.Downloading);
+
+        Assert.Equal(DepStatus.Installed, child.Status);
+        Assert.Equal(2, updates);
+    }
+
+    [Fact]
+    public void Updates_along_shared_paths_coalesce_into_one_frame_after_200_milliseconds()
+    {
+        using var console = new TerminalTestConsole(120, 10);
+        var app = new Dep { Name = "app" };
+        var left = new Dep { Name = "left" };
+        var right = new Dep { Name = "right" };
+        app.Add(left);
+        app.Add(right);
+        var display = StartDisplay(console, out var clock, app, app);
+        var initialScreen = console.GetScreenText();
+        Assert.Equal("[.] app - Awaiting\n|- [.] left - Awaiting\n`- [.] right - Awaiting", initialScreen);
+        Assert.False(clock.HasPendingFrame);
+
+        var child = new Dep { Name = "child" };
+        left.Add(child);
+        right.Add(child);
+        var updates = 0;
+        app.Update += (_, _) => updates++;
+        child.SetStatus(DepStatus.Downloading, .25);
+        Assert.Equal(2, updates);
+        clock.Advance(FrameInterval - TimeSpan.FromMilliseconds(1));
+        Assert.Equal(initialScreen, console.GetScreenText());
+
+        child.SetStatus(DepStatus.Downloading, .75);
+        Assert.Equal(4, updates);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.Equal("""
+            [.] app - Awaiting
+            |- [.] left - Awaiting
+            |  `- [>] child - Downloading - [############----] 75%
+            `- [.] right - Awaiting
+               `- [>] child - Downloading - [############----] 75% (shared)
+            """, console.GetScreenText());
+        Assert.False(clock.HasPendingFrame);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        child.SetStatus(DepStatus.Downloaded);
+        clock.Advance(TimeSpan.Zero);
+        Assert.Contains("child - Downloaded (shared)", console.GetScreenText());
+        display.Finish();
     }
 
     [Fact]
@@ -28,8 +136,7 @@ public sealed class ProgressTests
         right.Add(shared);
         shared.SetStatus(DepStatus.Downloading, .5);
 
-        var display = new ProgressDisplay(console, [app]);
-        display.RenderFrame();
+        StartDisplay(console, out _, app);
 
         Assert.Same(shared, Assert.Single(right.Deps));
         InlineSnapshot.Validate(console.GetScreenText(), """
@@ -38,25 +145,6 @@ public sealed class ProgressTests
             |  `- [>] shared - Downloading - [########--------] 50%
             `- [.] right - Awaiting
                `- [>] shared - Downloading - [########--------] 50% (shared)
-            """);
-    }
-
-    [Fact]
-    public void Cycles_stop_at_a_shared_reference()
-    {
-        using var console = new TerminalTestConsole(120, 10);
-        var app = new Dep { Name = "app" };
-        var child = new Dep { Name = "child" };
-        app.Add(child);
-        child.Add(app);
-
-        var display = new ProgressDisplay(console, [app]);
-        display.RenderFrame();
-
-        InlineSnapshot.Validate(console.GetScreenText(), """
-            [.] app - Awaiting
-            `- [.] child - Awaiting
-               `- [.] app - Awaiting (shared)
             """);
     }
 
@@ -73,8 +161,7 @@ public sealed class ProgressTests
         installing.SetStatus(DepStatus.Installing, detail: "Extracting");
         installed.SetStatus(DepStatus.Installed, detail: "Pinned");
 
-        var display = new ProgressDisplay(console, [new Dep(), downloading, downloaded, installing, installed]);
-        display.RenderFrame();
+        StartDisplay(console, out _, new Dep(), downloading, downloaded, installing, installed);
 
         InlineSnapshot.Validate(console.GetScreenText(), """
             [.] (unnamed) - Awaiting
@@ -92,20 +179,23 @@ public sealed class ProgressTests
     {
         using var console = new TerminalTestConsole(120, 10);
         var dep = new Dep { Name = "app" };
-        var display = new ProgressDisplay(console, [dep]);
         dep.SetStatus(stage, .5, "A longer status detail");
-        display.RenderFrame();
+        var display = StartDisplay(console, out var clock, dep);
         Assert.Contains("[########--------] 50%", console.GetScreenText());
+        Assert.False(clock.HasPendingFrame);
 
         dep.SetStatus(stage);
-        display.RenderFrame();
+        clock.Advance(FrameInterval);
         Assert.Equal($"[>] app - {stage} - [->--------------]", console.GetScreenText());
-        display.RenderFrame();
+        clock.Advance(FrameInterval);
         Assert.Equal($"[>] app - {stage} - [-->-------------]", console.GetScreenText());
+        Assert.True(clock.HasPendingFrame);
 
         dep.SetStatus(DepStatus.Installed);
         display.Finish();
-        display.RenderFrame();
+        Assert.False(clock.HasPendingFrame);
+        dep.SetStatus(DepStatus.Awaiting);
+        clock.Advance(FrameInterval);
         display.Finish();
         Assert.Equal("[+] app - Installed", console.GetScreenText());
     }
@@ -199,13 +289,19 @@ public sealed class ProgressTests
     public void Parallel_updates_leave_a_renderable_state()
     {
         using var console = new TerminalTestConsole(120, 10);
-        var dep = new Dep { Name = "app" };
+        var app = new Dep { Name = "app" };
+        var dep = new Dep { Name = "dependency" };
+        Parallel.For(0, 100, _ => app.Add(dep));
+        Assert.Same(dep, Assert.Single(app.Deps));
+        var updates = 0;
+        app.Update += (_, _) => Interlocked.Increment(ref updates);
+
         Parallel.For(0, 100, i => dep.SetStatus(DepStatus.Downloading, i / 100d));
         dep.SetStatus(DepStatus.Downloaded);
-        var display = new ProgressDisplay(console, [dep]);
-        display.RenderFrame();
+        StartDisplay(console, out _, app);
 
-        Assert.Equal("[.] app - Downloaded", console.GetScreenText());
+        Assert.Equal(101, updates);
+        Assert.Equal("[.] app - Awaiting\n`- [.] dependency - Downloaded", console.GetScreenText());
     }
 
     [Fact]
@@ -214,8 +310,7 @@ public sealed class ProgressTests
         using var console = new TerminalTestConsole(20, 10);
         var dep = new Dep { Name = "app" };
         dep.SetStatus(DepStatus.Downloading, .5);
-        var display = new ProgressDisplay(console, [dep]);
-        display.RenderFrame();
+        StartDisplay(console, out _, dep);
 
         Assert.Equal("[>] app - Downloadi", console.GetScreenText());
     }
@@ -226,8 +321,7 @@ public sealed class ProgressTests
         using var console = new TerminalTestConsole(120, 6);
         var roots = new[] { "one", "two", "three", "four", "five" }.Select(name => new Dep { Name = name }).ToArray();
         foreach (var dep in roots) dep.SetStatus(DepStatus.Installed);
-        var display = new ProgressDisplay(console, roots);
-        display.RenderFrame();
+        var display = StartDisplay(console, out _, roots);
 
         InlineSnapshot.Validate(console.GetScreenText(), """
             [+] one - Installed
@@ -252,20 +346,22 @@ public sealed class ProgressTests
     {
         using var console = new TerminalTestConsole(120, 10);
         var dep = new Dep { Name = "app" };
-        var display = new ProgressDisplay(console, [dep]);
-        display.RenderFrame();
+        var display = StartDisplay(console, out var clock, dep);
 
         display.Out.Write("Catalog ");
-        display.RenderFrame();
+        dep.Name = "renamed";
+        clock.Advance(FrameInterval / 2);
         Assert.Equal("Catalog", console.GetScreenText());
         display.Out.WriteLine("updated");
         display.Error.WriteLine("Warning\nmessage\u001b[2J");
-        display.RenderFrame();
+        clock.Advance(TimeSpan.Zero);
+        Assert.Equal("Catalog updated\nWarning message [2J", console.GetScreenText());
+        clock.Advance(FrameInterval / 2);
 
         InlineSnapshot.Validate(console.GetScreenText(), """
             Catalog updated
             Warning message [2J
-            [.] app - Awaiting
+            [.] renamed - Awaiting
             """);
 
         dep.SetStatus(DepStatus.Installed);
@@ -273,7 +369,63 @@ public sealed class ProgressTests
         InlineSnapshot.Validate(console.GetScreenText(), """
             Catalog updated
             Warning message [2J
-            [+] app - Installed
+            [+] renamed - Installed
             """);
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private long timestamp;
+        private ManualTimer? timer;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => timestamp;
+        public bool HasPendingFrame => timer?.DueAt is not null;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            Assert.Null(timer);
+            timer = new ManualTimer(this, callback, state);
+            timer.Change(dueTime, period);
+            return timer;
+        }
+
+        public void Advance(TimeSpan elapsed)
+        {
+            timestamp += elapsed.Ticks;
+            if (timer?.DueAt is { } due && due <= timestamp) timer.Fire();
+        }
+
+        private sealed class ManualTimer(ManualTimeProvider clock, TimerCallback callback, object? state) : ITimer
+        {
+            private bool disposed;
+            public long? DueAt { get; private set; }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                if (disposed) return false;
+                Assert.Equal(Timeout.InfiniteTimeSpan, period);
+                DueAt = dueTime == Timeout.InfiniteTimeSpan ? null : clock.GetTimestamp() + dueTime.Ticks;
+                return true;
+            }
+
+            public void Fire()
+            {
+                DueAt = null;
+                callback(state);
+            }
+
+            public void Dispose()
+            {
+                disposed = true;
+                DueAt = null;
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
     }
 }

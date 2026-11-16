@@ -20,27 +20,39 @@ public sealed class Dep
     internal readonly record struct Snapshot(
         string Name, ImmutableArray<Dep> Deps, DepStatus Status, double? Fraction, string? Detail);
 
+    /// <summary>Raised when this dependency or one of its descendants changes.</summary>
+    public event EventHandler? Update;
+
     public string Name
     {
         get => Capture().Name;
         set
         {
             ArgumentNullException.ThrowIfNull(value);
-            lock (gate) state = state with { Name = value };
+            lock (gate)
+            {
+                if (state.Name == value) return;
+                state = state with { Name = value };
+            }
+            NotifyUpdate();
         }
     }
 
     public IReadOnlyList<Dep> Deps => Capture().Deps;
     public DepStatus Status => Capture().Status;
 
+    /// <summary>Adds a dependency to an acyclic graph. The caller validates the graph.</summary>
     public void Add(Dep dependency)
     {
         ArgumentNullException.ThrowIfNull(dependency);
         lock (gate)
         {
-            if (!state.Deps.Contains(dependency))
-                state = state with { Deps = state.Deps.Add(dependency) };
+            if (state.Deps.Contains(dependency)) return;
+            var deps = state.Deps.Add(dependency);
+            dependency.Update += OnChildUpdate;
+            state = state with { Deps = deps };
         }
+        NotifyUpdate();
     }
 
     /// <summary>A null fraction animates the bar during Downloading and Installing.</summary>
@@ -56,8 +68,17 @@ public sealed class Dep
                 throw new ArgumentException("Only Downloading and Installing can have a progress fraction.", nameof(fraction));
         }
 
-        lock (gate) state = state with { Status = status, Fraction = fraction, Detail = detail };
+        lock (gate)
+        {
+            if (state.Status == status && state.Fraction == fraction && state.Detail == detail) return;
+            state = state with { Status = status, Fraction = fraction, Detail = detail };
+        }
+        NotifyUpdate();
     }
+
+    private void NotifyUpdate() => Update?.Invoke(this, EventArgs.Empty);
+
+    private void OnChildUpdate(object? sender, EventArgs args) => NotifyUpdate();
 
     /// <summary>Displays the roots while the operation runs and routes its diagnostics above the live tree.</summary>
     public static async Task RunAsync(ITerminal terminal, IReadOnlyList<Dep> roots,
@@ -68,10 +89,10 @@ public sealed class Dep
         ArgumentNullException.ThrowIfNull(operation);
 
         var display = new ProgressDisplay(terminal, roots);
-        using var timer = display.Start();
         string? interruption = null;
         try
         {
+            display.Start();
             cancellationToken.ThrowIfCancellationRequested();
             await operation(display).ConfigureAwait(false);
         }

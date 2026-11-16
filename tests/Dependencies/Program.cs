@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Tapka;
+using Tapka.Terminal;
 
 var powerShell = PackageInstaller.FindSystemPowerShell() ?? throw new Exception("PowerShell 7 is required.");
 var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
@@ -34,7 +35,8 @@ try
     var cmdBytes = File.ReadAllBytes(cmd);
     var handler = new FixtureDownloads();
     using var http = new HttpClient(handler);
-    var installer = new PackageInstaller(scope, new PackageRepository(http, repository), http, systemPowerShell: null);
+    var terminal = new SystemTerminal();
+    var installer = new PackageInstaller(scope, new PackageRepository(http, repository), http, terminal, systemPowerShell: null);
 
     void Recipe(string id, object[] dependencies, string[] commands, string version = "1",
         string? script = null, Dictionary<string, byte[]>? files = null, bool? extract = null)
@@ -119,6 +121,7 @@ try
     Recipe("a", ["d", Rename("b", ("tapka-b.EXE", "vendor-b"))], ["tapka-a"], script: installScript);
     await Install("a");
     AssertPublic("tapka-a");
+    await TerminalTests.RunAsync(installation);
     Check(File.Exists(PackageFile("powershell", "pwsh.exe")) && await Installed("powershell") is { Selector: null },
         "PowerShell was not bootstrapped privately.");
     Check(!Directory.Exists(shims.DependencyDirectory(shims.ActiveGeneration!, "c")), "Unexpected directory for a package with no dependencies.");
@@ -243,7 +246,7 @@ try
             """;
         command.ExecuteNonQuery();
     }
-    var failingInstaller = new PackageInstaller(failedScope, new PackageRepository(http, repository), http, powerShell);
+    var failingInstaller = new PackageInstaller(failedScope, new PackageRepository(http, repository), http, terminal, powerShell);
     try
     {
         await failingInstaller.InstallAsync("c", "latest", arch, CancellationToken.None);

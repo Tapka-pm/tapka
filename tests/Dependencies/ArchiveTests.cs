@@ -335,20 +335,21 @@ internal static class ArchiveTests
     {
         ProcessStartInfo SleepingProcess() => Start(pwsh, Environment.CurrentDirectory, "-NoProfile", "-Command", "Start-Sleep -Seconds 60");
 
-        await Fails(() => InstallProcess.RunAsync(SleepingProcess(), "test process", CancellationToken.None,
+        var terminal = new Tapka.Terminal.SystemTerminal();
+        await Fails(() => InstallProcess.RunAsync(SleepingProcess(), "test process", terminal, CancellationToken.None,
             timeout: TimeSpan.FromMilliseconds(150)), "timed out");
         using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(150)))
         {
             try
             {
-                await InstallProcess.RunAsync(SleepingProcess(), "test process", cancel.Token);
+                await InstallProcess.RunAsync(SleepingProcess(), "test process", terminal, cancel.Token);
                 throw new Exception("Process cancellation did not propagate.");
             }
             catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
         }
         var failingProcess = Start(Path.Combine(Environment.SystemDirectory, "cmd.exe"), Environment.CurrentDirectory,
             "/d", "/c", "exit 42");
-        await Fails(() => InstallProcess.RunAsync(failingProcess, "test process", CancellationToken.None), "exit code 42");
+        await Fails(() => InstallProcess.RunAsync(failingProcess, "test process", terminal, CancellationToken.None), "exit code 42");
     }
 
     private static async Task RunChecked(string executable, string directory, params string[] args)

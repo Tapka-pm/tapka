@@ -1,15 +1,16 @@
 using System.Runtime.InteropServices;
+using Tapka.Terminal;
 
-internal sealed class SetupSqlite(string directory) : IDisposable
+internal sealed class SetupSqlite(string directory, ITerminal terminal) : IDisposable
 {
     private IntPtr handle;
 
-    public static SetupSqlite Load()
+    public static SetupSqlite Load(ITerminal terminal)
     {
         using var resource = typeof(SetupSqlite).Assembly.GetManifestResourceStream("tapka.e_sqlite3.dll")
             ?? throw new InvalidOperationException("The setup binary is missing its SQLite library.");
         var directory = Directory.CreateTempSubdirectory("tapka-sqlite-").FullName;
-        var library = new SetupSqlite(directory);
+        var library = new SetupSqlite(directory, terminal);
         try
         {
             var path = Path.Combine(directory, "e_sqlite3.dll");
@@ -43,7 +44,7 @@ internal sealed class SetupSqlite(string directory) : IDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            Console.Error.WriteLine($"tapka-setup: could not clean up '{directory}': {error.Message}");
+            terminal.Error.WriteLine($"tapka-setup: could not clean up '{directory}': {error.Message}");
         }
     }
 }

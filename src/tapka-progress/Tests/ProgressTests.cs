@@ -1,12 +1,21 @@
 using Meziantou.Framework.InlineSnapshotTesting;
+using Tapka.Terminal;
 using Tapka.Terminal.Testing;
 
 namespace Tapka.Progress.Tests;
 
 public sealed class ProgressTests
 {
-    private static ProgressTree Live(TerminalTestConsole console, CancellationToken token = default) =>
-        new(console.Out, true, () => (console.Width, console.Height), token);
+    private static ProgressTree Live(ITerminal terminal, CancellationToken token = default) =>
+        new(terminal, autoRender: false, token);
+
+    private sealed record PlainTerminal(TextWriter Out) : ITerminal
+    {
+        public TextWriter Error => TextWriter.Null;
+        public int Width => 80;
+        public int Height => 24;
+        public bool IsInteractive => false;
+    }
 
     [Fact]
     public void Shared_dependencies_propagate_state_without_duplicate_edges()
@@ -51,8 +60,8 @@ public sealed class ProgressTests
     [Fact]
     public void Plain_output_emits_only_one_final_tree()
     {
-        using var console = new TerminalTestConsole(120, 10);
-        using var tree = new ProgressTree(console.Out);
+        using var console = new TerminalTestConsole(120, 10, isInteractive: false);
+        using var tree = new ProgressTree(console);
         tree.Add("app");
         tree.Add("pending", "app");
         tree.Report("app", "Downloading", .5);
@@ -77,7 +86,7 @@ public sealed class ProgressTests
     public void Plain_stream_contains_no_terminal_commands_and_sanitizes_input()
     {
         using var output = new StringWriter();
-        using var tree = new ProgressTree(output);
+        using var tree = new ProgressTree(new PlainTerminal(output));
         tree.Add("app\n\u001b");
         tree.Report("app\n\u001b", "Unsafe\nstatus\u001b[2J", name: "safe\tname");
         Assert.Equal("[|] safe name - Unsafe status [2J - [>---------------]", tree.Snapshot());
@@ -89,6 +98,8 @@ public sealed class ProgressTests
         var final = output.ToString();
         tree.Dispose();
         Assert.Equal(final, output.ToString());
+        output.WriteLine("Still open");
+        Assert.EndsWith("Still open" + Environment.NewLine, output.ToString());
     }
 
     [Theory]
@@ -96,9 +107,9 @@ public sealed class ProgressTests
     [InlineData(true)]
     public void Cancellation_preserves_completed_work_and_cancels_unfinished_nodes(bool interactive)
     {
-        using var console = new TerminalTestConsole(120, 10);
+        using var console = new TerminalTestConsole(120, 10, interactive);
         using var cancellation = new CancellationTokenSource();
-        using var tree = interactive ? Live(console, cancellation.Token) : new ProgressTree(console.Out, cancellation.Token);
+        using var tree = Live(console, cancellation.Token);
         tree.Add("done");
         tree.Report("done", "Done", state: ProgressState.Completed);
         tree.Add("running");
@@ -231,7 +242,10 @@ public sealed class ProgressTests
         using var tree = Live(console);
         tree.Add("app");
         tree.RenderFrame();
-        tree.WriteLine("Warning\nmessage\u001b[2J", useError ? console.Error : null);
+        if (useError)
+            tree.WriteErrorLine("Warning\nmessage\u001b[2J");
+        else
+            tree.WriteLine("Warning\nmessage\u001b[2J");
         Assert.Equal("Warning message [2J", console.GetScreenText());
         tree.RenderFrame();
         InlineSnapshot.Validate(console.GetScreenText(), """

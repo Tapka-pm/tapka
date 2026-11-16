@@ -4,8 +4,8 @@ using LibGhostty;
 
 namespace Tapka.Terminal.Testing;
 
-/// <summary>Emulates a terminal for code that accepts text writers for its output.</summary>
-public sealed class TerminalTestConsole : IDisposable
+/// <summary>Emulates a terminal and exposes the visible screen for assertions.</summary>
+public sealed class TerminalTestConsole : ITerminal, IDisposable
 {
     private readonly object gate = new();
     private readonly GhosttyNativeLibrary ghostty;
@@ -17,7 +17,12 @@ public sealed class TerminalTestConsole : IDisposable
 
     /// <param name="width">Screen width in columns.</param>
     /// <param name="height">Screen height in rows.</param>
-    public TerminalTestConsole(int width, int height)
+    public TerminalTestConsole(int width, int height) : this(width, height, isInteractive: true) { }
+
+    /// <param name="width">Screen width in columns.</param>
+    /// <param name="height">Screen height in rows.</param>
+    /// <param name="isInteractive">Whether the code under test should render interactive output.</param>
+    public TerminalTestConsole(int width, int height, bool isInteractive)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(width, ushort.MaxValue);
@@ -26,6 +31,7 @@ public sealed class TerminalTestConsole : IDisposable
 
         Width = width;
         Height = height;
+        IsInteractive = isInteractive;
         Out = new TerminalWriter(this);
         Error = new TerminalWriter(this);
 
@@ -52,6 +58,7 @@ public sealed class TerminalTestConsole : IDisposable
 
     public int Width { get; }
     public int Height { get; }
+    public bool IsInteractive { get; }
     public TextWriter Out { get; }
     public TextWriter Error { get; }
 

@@ -12,6 +12,7 @@
     <DefineConstants Condition="'$(TapkaTestBuild)' == 'true'">$(DefineConstants);TAPKA_TEST_BUILD</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Tapka.Terminal/Tapka.Terminal.csproj" />
     <ProjectReference Include="../tapka-progress/tapka-progress.csproj" />
     <PackageReference Include="System.CommandLine" Version="3.0.0" />
   </ItemGroup>

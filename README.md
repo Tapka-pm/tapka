@@ -95,12 +95,14 @@ tapka install git --repository ..\packages
 
 Общие зависимости имеют единое состояние и показываются у каждого родителя; повторное поддерево помечается `(shared)`. Служебные зависимости, включая PowerShell и распаковщики, тоже входят в дерево. Длинные строки обрезаются по ширине терминала, большое дерево ограничивается высотой окна; при завершении выводится полное дерево. Диагностика скриптов печатается над обновляемой областью. В файле, pipe и при `TERM=dumb` выводится итоговое дерево без ANSI-кодов и промежуточных кадров.
 
-Публичный API библиотеки не зависит от установщика:
+Публичный API библиотеки принимает `ITerminal`. Клиент передаёт `SystemTerminal`, а тесты могут передать `TerminalTestConsole`.
 
 ```csharp
 using Tapka.Progress;
+using Tapka.Terminal;
 
-using var progress = new ProgressTree(cancellationToken: token);
+ITerminal terminal = new SystemTerminal();
+using var progress = new ProgressTree(terminal, token);
 progress.Add("app");
 progress.Add("dependency", parentId: "app");
 progress.Report("dependency", "Downloading", fraction: 0.5);
@@ -108,7 +110,7 @@ progress.Report("dependency", "Installed", state: ProgressState.Completed);
 progress.Report("app", "Installed", state: ProgressState.Completed);
 ```
 
-`Report` безопасен для параллельных вызовов. `WriteLine` выводит диагностику, `Pause` временно передаёт консоль внешнему компоненту, `Snapshot` возвращает текст дерева. Передача `TextWriter` конструктору включает текстовый режим для логов и тестов. `Dispose` останавливает перерисовку и сохраняет итог; незавершённые узлы помечаются как прерванные.
+`Report` безопасен для параллельных вызовов. `WriteLine` пишет диагностику в stdout, а `WriteErrorLine` — в stderr. `Pause` временно передаёт терминал внешнему компоненту, `Snapshot` возвращает текст дерева. При `IsInteractive == false` прогресс пишет только итоговое дерево и диагностику. `Dispose` останавливает перерисовку, помечает незавершённые узлы как прерванные и выводит итог.
 
 Тесты библиотеки запускаются отдельно командой `dotnet test src/tapka-progress/Tests` из каталога клиента; нужны .NET 11 SDK и Windows x64. Они используют `Tapka.Terminal.Testing` для проверки итогового экрана и ANSI-перерисовки. Кадры запускаются вручную с фиксированными размерами терминала, без ожидания таймера. Inline-снимки по умолчанию только проверяются. Для явного обновления задайте `INLINESNAPSHOTTESTING_STRATEGY=OverwriteWithoutFailure`, запустите тесты, удалите переменную, просмотрите `git diff` и повторите запуск в обычном режиме. Подробнее — в [README Tapka.Terminal.Testing](src/Tapka.Terminal.Testing/README.md#run-tests-and-update-inline-snapshots).
 

@@ -1,6 +1,6 @@
 # Tapka.Terminal.Testing
 
-Tapka.Terminal.Testing is a virtual terminal for .NET tests. Pass its `TextWriter` instances to your console code, then assert on the text left on the screen. It uses [LibGhostty.Net](https://github.com/jkelin/libghostty-net) to interpret ANSI sequences, so a test can verify that a progress update replaced a previous line or that text wrapped at a given width.
+Tapka.Terminal.Testing is a virtual terminal for .NET tests. Pass it to code that accepts a `Tapka.Terminal.ITerminal`, then assert on the text left on the screen. It uses [LibGhostty.Net](https://github.com/jkelin/libghostty-net) to interpret ANSI sequences, so a test can verify that a progress update replaced a previous line or that text wrapped at a given width.
 
 ## Add it to a test project
 
@@ -17,9 +17,9 @@ dotnet package add Meziantou.Framework.InlineSnapshotTesting --version 6.0.24 --
 ## Write a test
 
 ```csharp
-using System.IO;
 using System.Threading.Tasks;
 using Meziantou.Framework.InlineSnapshotTesting;
+using Tapka.Terminal;
 using Tapka.Terminal.Testing;
 using Xunit;
 
@@ -30,7 +30,7 @@ public sealed class ProgressTests
     {
         using var console = new TerminalTestConsole(width: 40, height: 10);
 
-        WriteProgress(console.Out);
+        WriteProgress(console);
 
         InlineSnapshot.Validate(console.GetScreenText(), """
             Done
@@ -42,7 +42,7 @@ public sealed class ProgressTests
     {
         using var console = new TerminalTestConsole(width: 40, height: 10);
 
-        await WriteStatusAsync(console.Out, console.Error);
+        await WriteStatusAsync(console);
 
         InlineSnapshot.Validate(console.GetScreenText(), """
             Checked packages
@@ -50,21 +50,21 @@ public sealed class ProgressTests
             """);
     }
 
-    private static void WriteProgress(TextWriter output)
+    private static void WriteProgress(ITerminal terminal)
     {
-        output.Write("Downloading 10%");
-        output.Write("\r\u001b[2KDone");
+        terminal.Out.Write("Downloading 10%");
+        terminal.Out.Write("\r\u001b[2KDone");
     }
 
-    private static async Task WriteStatusAsync(TextWriter output, TextWriter error)
+    private static async Task WriteStatusAsync(ITerminal terminal)
     {
-        await output.WriteLineAsync("Checked packages");
-        await error.WriteLineAsync("Warning: one update failed");
+        await terminal.Out.WriteLineAsync("Checked packages");
+        await terminal.Error.WriteLineAsync("Warning: one update failed");
     }
 }
 ```
 
-The constructor takes a required `width` in columns and `height` in rows. The emulator uses those dimensions for wrapping and scrolling. `Out` and `Error` are separate writers into the same screen, each with its own `NewLine` setting. Await async writes before reading the screen. Use `using` to release the emulator after each test.
+The constructor takes a required `width` in columns and `height` in rows. The emulator uses those dimensions for wrapping and scrolling. It reports `IsInteractive` as true by default. Pass `isInteractive: false` to exercise code that writes plain output. `Out` and `Error` are separate writers into the same screen, each with its own `NewLine` setting. Await async writes before reading the screen. Use `using` to release the emulator after each test.
 
 `GetScreenText()` joins the visible rows with LF. It preserves leading spaces and blank rows between lines, trims trailing spaces from each row, and omits blank rows at the bottom. The result contains screen text only. Scrollback, cursor position, colors, and styles are outside the snapshot. Tests provide their own code under test and control when the snapshot is taken. Process hosting, PTYs, image rendering, and animation timing are outside the package's scope.
 

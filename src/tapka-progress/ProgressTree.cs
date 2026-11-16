@@ -1,3 +1,6 @@
+using Tapka.Terminal;
+using XenoAtom.Ansi;
+
 namespace Tapka.Progress;
 
 public enum ProgressState { Waiting, Running, Completed, Failed, Cancelled }
@@ -17,9 +20,8 @@ public sealed class ProgressTree : IDisposable
     private readonly object gate = new();
     private readonly Dictionary<string, Node> nodes = new(StringComparer.Ordinal);
     private readonly List<string> roots = [];
-    private readonly TextWriter output;
-    private readonly bool interactive;
-    private readonly Func<(int Width, int Height)> getSize;
+    private readonly ITerminal terminal;
+    private readonly AnsiWriter ansi;
     private readonly CancellationToken cancellationToken;
     private readonly Timer? timer;
     private int drawnLines;
@@ -27,23 +29,17 @@ public sealed class ProgressTree : IDisposable
     private int pauses;
     private bool disposed;
 
-    /// <param name="output">An explicit writer uses plain text output, suitable for logs and tests.</param>
-    public ProgressTree(TextWriter? output = null, CancellationToken cancellationToken = default)
-        : this(output ?? Console.Out,
-            output is null && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb",
-            () => (Console.WindowWidth, Console.WindowHeight), cancellationToken)
-    {
-        if (interactive) timer = new Timer(_ => RenderFrame(), null, 0, 100);
-    }
+    public ProgressTree(ITerminal terminal, CancellationToken cancellationToken = default)
+        : this(terminal, autoRender: true, cancellationToken) { }
 
     // Tests drive frames explicitly; the public constructor owns automatic rendering.
-    internal ProgressTree(TextWriter output, bool interactive, Func<(int Width, int Height)> getSize,
-        CancellationToken cancellationToken = default)
+    internal ProgressTree(ITerminal terminal, bool autoRender, CancellationToken cancellationToken = default)
     {
-        this.output = output;
-        this.interactive = interactive;
-        this.getSize = getSize;
+        this.terminal = terminal;
+        ansi = new AnsiWriter(terminal.Out, AnsiCapabilities.Default);
         this.cancellationToken = cancellationToken;
+        if (autoRender && terminal.IsInteractive)
+            timer = new Timer(_ => RenderFrame(), null, 0, 100);
     }
 
     public void Add(string id, string? parentId = null)
@@ -102,12 +98,17 @@ public sealed class ProgressTree : IDisposable
         }
     }
 
-    public void WriteLine(string message, TextWriter? writer = null)
+    public void WriteLine(string message) => WriteLine(terminal.Out, message);
+
+    public void WriteErrorLine(string message) => WriteLine(terminal.Error, message);
+
+    private void WriteLine(TextWriter writer, string message)
     {
         lock (gate)
         {
             Clear();
-            (writer ?? output).WriteLine(Clean(message));
+            writer.WriteLine(Clean(message));
+            writer.Flush();
         }
     }
 
@@ -153,20 +154,19 @@ public sealed class ProgressTree : IDisposable
     {
         lock (gate)
         {
-            if (!interactive || disposed || pauses > 0) return;
+            if (disposed || pauses > 0 || !terminal.IsInteractive) return;
             try
             {
                 Clear();
-                var size = getSize();
-                var width = Math.Max(1, size.Width - 1);
-                var height = Math.Max(1, size.Height - 2);
+                var width = Math.Max(1, terminal.Width - 1);
+                var height = Math.Max(1, terminal.Height - 2);
                 var lines = Lines();
                 var visible = lines.Take(height).ToList();
                 if (lines.Count > height) visible[^1] = $"... {lines.Count - height + 1} more rows (full tree on completion)";
                 foreach (var line in visible)
-                    output.WriteLine(line.Length <= width ? line : line[..width]);
+                    terminal.Out.WriteLine(line.Length <= width ? line : line[..width]);
                 drawnLines = visible.Count;
-                output.Flush();
+                terminal.Out.Flush();
                 frame = (frame + 1) % 16;
             }
             catch (IOException) { /* A detached console must not fail installation. */ }
@@ -176,8 +176,9 @@ public sealed class ProgressTree : IDisposable
     private void Clear()
     {
         if (drawnLines == 0) return;
-        output.Write($"\u001b[{drawnLines}A\r\u001b[J");
+        ansi.CursorUp(drawnLines).CursorHorizontalAbsolute(1).EraseInDisplay(0);
         drawnLines = 0;
+        terminal.Out.Flush();
     }
 
     public void Dispose()
@@ -194,8 +195,8 @@ public sealed class ProgressTree : IDisposable
                 node.Fraction = null;
             }
             Clear();
-            foreach (var line in Lines()) output.WriteLine(line);
-            output.Flush();
+            foreach (var line in Lines()) terminal.Out.WriteLine(line);
+            terminal.Out.Flush();
         }
     }
 

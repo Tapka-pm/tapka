@@ -1,10 +1,11 @@
 using System.Diagnostics;
+using Tapka.Terminal;
 
 namespace Tapka;
 
 internal static class InstallProcess
 {
-    public static async Task RunAsync(ProcessStartInfo start, string description, CancellationToken cancellationToken,
+    public static async Task RunAsync(ProcessStartInfo start, string description, ITerminal terminal, CancellationToken cancellationToken,
         Func<Process, CancellationToken, Task>? readOutput = null, TimeSpan? timeout = null, Action<string>? diagnostic = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -23,8 +24,8 @@ internal static class InstallProcess
             var readers = new List<Task>
             {
                 readOutput is not null ? readOutput(process, deadline.Token)
-                    : ForwardAsync(process.StandardOutput, diagnostic ?? Console.WriteLine, deadline.Token),
-                ForwardAsync(process.StandardError, diagnostic ?? Console.Error.WriteLine, deadline.Token),
+                    : ForwardAsync(process.StandardOutput, diagnostic ?? terminal.Out.WriteLine, deadline.Token),
+                ForwardAsync(process.StandardError, diagnostic ?? terminal.Error.WriteLine, deadline.Token),
                 process.WaitForExitAsync(deadline.Token)
             };
             // Observe a rejected archive listing immediately, even while the child is still writing.

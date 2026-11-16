@@ -2,11 +2,12 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Tapka.Terminal;
 
 namespace Tapka;
 
 // The caller holds the installation lock while acquiring or using snapshots.
-internal sealed class CatalogCache(InstallScope scope, HttpClient http)
+internal sealed class CatalogCache(InstallScope scope, HttpClient http, ITerminal terminal)
 {
     private const long MaxCatalogBytes = 128 * 1024 * 1024;
 
@@ -57,7 +58,7 @@ internal sealed class CatalogCache(InstallScope scope, HttpClient http)
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, pointer, overwrite: true);
             published = true;
-            Console.WriteLine($"Updated catalog '{repository.Source}'.");
+            terminal.Out.WriteLine($"Updated catalog '{repository.Source}'.");
             return new PackageRepository(http, repository.Source, next);
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or InvalidDataException or IOException)

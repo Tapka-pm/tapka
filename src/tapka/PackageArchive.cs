@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
+using Tapka.Terminal;
 
 namespace Tapka;
 
@@ -50,7 +51,7 @@ internal static class PackageArchive
     }
 
     public static async Task ExtractAsync(ArchiveFormat format, string archive, string destination, string? extractor,
-        CancellationToken cancellationToken, Action<string>? diagnostic = null)
+        ITerminal terminal, CancellationToken cancellationToken, Action<string>? diagnostic = null)
     {
         using var input = File.OpenRead(archive);
         switch (format)
@@ -75,7 +76,7 @@ internal static class PackageArchive
                 await using (var output = new FileStream(tar, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                     81920, useAsync: true))
                 {
-                    await Run7ZipAsync(extractor!, archive, "x", ["-txz", "-so", "-bso0"], cancellationToken,
+                    await Run7ZipAsync(extractor!, archive, "x", ["-txz", "-so", "-bso0"], terminal, cancellationToken,
                         (process, token) => process.StandardOutput.BaseStream.CopyToAsync(output, token), diagnostic);
                 }
                 using (var decoded = File.OpenRead(tar))
@@ -86,10 +87,10 @@ internal static class PackageArchive
             case ArchiveFormat.SevenZip:
             case ArchiveFormat.Rar:
                 var type = format == ArchiveFormat.SevenZip ? "-t7z" : ReadRarType(input);
-                await Run7ZipAsync(extractor!, archive, "l", [type, "-slt"], cancellationToken,
+                await Run7ZipAsync(extractor!, archive, "l", [type, "-slt"], terminal, cancellationToken,
                     (process, token) => ValidateListingAsync(process.StandardOutput, destination, token), diagnostic);
                 await Run7ZipAsync(extractor!, archive, "x",
-                    [type, "-bso0", "-snl-", "-snh-", "-sns-", "-y", $"-o{destination}"], cancellationToken, diagnostic: diagnostic);
+                    [type, "-bso0", "-snl-", "-snh-", "-sns-", "-y", $"-o{destination}"], terminal, cancellationToken, diagnostic: diagnostic);
                 ValidateExtractedTree(destination, cancellationToken);
                 break;
             default:
@@ -136,7 +137,8 @@ internal static class PackageArchive
     }
 
     private static Task Run7ZipAsync(string extractor, string archive, string command, string[] switches,
-        CancellationToken cancellationToken, Func<Process, CancellationToken, Task>? readOutput = null, Action<string>? diagnostic = null)
+        ITerminal terminal, CancellationToken cancellationToken, Func<Process, CancellationToken, Task>? readOutput = null,
+        Action<string>? diagnostic = null)
     {
         var start = new ProcessStartInfo(extractor) { WorkingDirectory = Path.GetDirectoryName(extractor)! };
         if (readOutput is not null)
@@ -147,7 +149,7 @@ internal static class PackageArchive
         {
             start.ArgumentList.Add(argument);
         }
-        return InstallProcess.RunAsync(start, "7-Zip archive operation", cancellationToken, readOutput, diagnostic: diagnostic);
+        return InstallProcess.RunAsync(start, "7-Zip archive operation", terminal, cancellationToken, readOutput, diagnostic: diagnostic);
     }
 
     private static async Task ValidateListingAsync(StreamReader output, string destination, CancellationToken cancellationToken)

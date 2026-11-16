@@ -2,10 +2,11 @@ using System.Diagnostics;
 using Tapka.Progress;
 using System.Globalization;
 using System.Security.Cryptography;
+using Tapka.Terminal;
 
 namespace Tapka;
 
-internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http, string? systemPowerShell,
+internal sealed class PackageInstaller(InstallScope scope, PackageRepository repository, HttpClient http, ITerminal terminal, string? systemPowerShell,
     CatalogCache? catalog = null, bool refreshCatalog = false)
 {
     public Task InstallAsync(string id, string version, string architecture, CancellationToken cancellationToken,
@@ -29,7 +30,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         var shims = new PackageShims(scope.Root);
         var plan = new List<(PackageRelease Release, PackageRepository Repository)>();
         var downloads = new HashSet<string>();
-        using var progress = new ProgressTree(cancellationToken: cancellationToken);
+        using var progress = new ProgressTree(terminal, cancellationToken);
         var visiting = new HashSet<string>();
         var resolved = new HashSet<string>();
         var repositories = new Dictionary<string, PackageRepository>(StringComparer.Ordinal);
@@ -180,7 +181,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             !SameManifest(currentManifests[package.Id], manifests[package.Id])).ToArray();
         var generation = Guid.NewGuid().ToString("N");
         var publishShims = changes.Length > 0 || (!upgrade && !shims.HasPublicGeneration(publicCommands.Keys));
-        using var transaction = new InstallTransaction(scope.Root, line => progress.WriteLine(line, Console.Error));
+        using var transaction = new InstallTransaction(scope.Root, progress.WriteErrorLine);
         if (publishShims)
         {
             foreach (var (id, commands) in dependencyCommands)
@@ -219,7 +220,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             if (publishShims && prefix.Length != 0)
                 start.Environment["PATH"] = Path.Combine(scope.Root, prefix) + ";" + start.Environment["PATH"];
             start.ArgumentList.Add("--help");
-            await InstallProcess.RunAsync(start, "installed tapka", cancellationToken,
+            await InstallProcess.RunAsync(start, "installed tapka", terminal, cancellationToken,
                 async (process, token) => { await process.StandardOutput.ReadToEndAsync(token); }, TimeSpan.FromSeconds(30), line => progress.WriteLine(line));
         }
 
@@ -249,7 +250,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 transaction.Dispose();
                 throw;
             }
-            foreach (var warning in warnings) progress.WriteLine(warning, Console.Error);
+            foreach (var warning in warnings) progress.WriteErrorLine(warning);
         }
         shims.RemoveRetired(publicCommands);
         foreach (var (release, _) in plan)
@@ -285,7 +286,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         if (release.Archive is { } archive)
         {
             progress.Report(release.Id, "Extracting");
-            await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, cancellationToken,
+            await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, terminal, cancellationToken,
                 line => progress.WriteLine($"{release.Id}: {line}"));
         }
         if (release.Script is not null)
@@ -377,7 +378,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         return programFiles.Length > 0 && File.Exists(standardLocation) ? standardLocation : null;
     }
 
-    private static Task RunScriptAsync(string powerShell, string script, string installer, string destination,
+    private Task RunScriptAsync(string powerShell, string script, string installer, string destination,
         string? dependencies, string? bootstrap, CancellationToken cancellationToken, Action<string> diagnostic)
     {
         var start = new ProcessStartInfo(powerShell)
@@ -403,6 +404,6 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             start.Environment["PATH"] = string.IsNullOrEmpty(inheritedPath) ? dependencies : $"{dependencies};{inheritedPath}";
         }
 
-        return InstallProcess.RunAsync(start, "PowerShell installation script", cancellationToken, diagnostic: diagnostic);
+        return InstallProcess.RunAsync(start, "PowerShell installation script", terminal, cancellationToken, diagnostic: diagnostic);
     }
 }

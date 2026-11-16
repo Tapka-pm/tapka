@@ -9,6 +9,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Tapka.Terminal/Tapka.Terminal.csproj" />
     <PackageReference Include="LibGhostty.Net" Version="1.0.2" />
     <None Update="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>

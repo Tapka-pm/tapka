@@ -5,13 +5,14 @@ namespace Tapka;
 internal static class InstallProcess
 {
     public static async Task RunAsync(ProcessStartInfo start, string description, CancellationToken cancellationToken,
-        Func<Process, CancellationToken, Task>? readOutput = null, TimeSpan? timeout = null)
+        Func<Process, CancellationToken, Task>? readOutput = null, TimeSpan? timeout = null, Action<string>? diagnostic = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
         start.RedirectStandardInput = true;
-        start.RedirectStandardOutput = readOutput is not null;
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout ?? TimeSpan.FromMinutes(5));
@@ -19,11 +20,20 @@ internal static class InstallProcess
         try
         {
             process.StandardInput.Close();
-            if (readOutput is not null)
+            var readers = new List<Task>
             {
-                await readOutput(process, deadline.Token);
+                readOutput is not null ? readOutput(process, deadline.Token)
+                    : ForwardAsync(process.StandardOutput, diagnostic ?? Console.WriteLine, deadline.Token),
+                ForwardAsync(process.StandardError, diagnostic ?? Console.Error.WriteLine, deadline.Token),
+                process.WaitForExitAsync(deadline.Token)
+            };
+            // Observe a rejected archive listing immediately, even while the child is still writing.
+            while (readers.Count > 0)
+            {
+                var finished = await Task.WhenAny(readers);
+                await finished;
+                readers.Remove(finished);
             }
-            await process.WaitForExitAsync(deadline.Token);
         }
         catch (Exception error)
         {
@@ -48,5 +58,10 @@ internal static class InstallProcess
         {
             throw new IOException($"The {description} failed (exit code {process.ExitCode}).");
         }
+    }
+
+    private static async Task ForwardAsync(StreamReader reader, Action<string> write, CancellationToken token)
+    {
+        while (await reader.ReadLineAsync(token) is { } line) write(line);
     }
 }

@@ -1,6 +1,6 @@
 namespace Tapka;
 
-internal sealed class InstallTransaction(string root) : IDisposable
+internal sealed class InstallTransaction(string root, Action<string>? diagnostic = null) : IDisposable
 {
     private readonly string workDirectory = Path.Combine(root, $".install-{Guid.NewGuid():N}");
     private readonly List<Action> undo = [];
@@ -66,7 +66,7 @@ internal sealed class InstallTransaction(string root) : IDisposable
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
                 {
                     restored = false;
-                    Console.Error.WriteLine($"tapka: rollback failed: {error.Message}");
+                    (diagnostic ?? Console.Error.WriteLine)($"tapka: rollback failed: {error.Message}");
                 }
             }
         }
@@ -79,7 +79,7 @@ internal sealed class InstallTransaction(string root) : IDisposable
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-                Console.Error.WriteLine($"tapka: could not clean up \"{workDirectory}\": {error.Message}");
+                (diagnostic ?? Console.Error.WriteLine)($"tapka: could not clean up \"{workDirectory}\": {error.Message}");
             }
         }
     }

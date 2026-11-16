@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Tapka.Progress;
 using System.Globalization;
 using System.Security.Cryptography;
 
@@ -28,7 +29,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         var shims = new PackageShims(scope.Root);
         var plan = new List<(PackageRelease Release, PackageRepository Repository)>();
         var downloads = new HashSet<string>();
-        var pinned = new SortedSet<string>(StringComparer.Ordinal);
+        using var progress = new ProgressTree(cancellationToken: cancellationToken);
         var visiting = new HashSet<string>();
         var resolved = new HashSet<string>();
         var repositories = new Dictionary<string, PackageRepository>(StringComparer.Ordinal);
@@ -39,6 +40,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         {
             if (!repositories.TryGetValue(source, out var result))
             {
+                using var consolePause = progress.Pause();
                 result = catalog is null
                     ? new PackageRepository(http, source)
                     : await catalog.OpenAsync(source, refreshCatalog, cancellationToken);
@@ -54,10 +56,12 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
 
         var powerShell = ExistingPowerShell();
 
-        async Task ResolveAsync(string id, string? requestedVersion, string? parentSource)
+        async Task ResolveAsync(string id, string? requestedVersion, string? parentSource, string? parentId = null)
         {
+            progress.Add(id, parentId);
             cancellationToken.ThrowIfCancellationRequested();
             if (resolved.Contains(id)) return;
+            progress.Report(id, "Resolving");
             if (!visiting.Add(id)) throw new IOException($"Dependency cycle at package '{id}'.");
 
             var previous = installed.GetValueOrDefault(id);
@@ -68,10 +72,10 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             {
                 var manifest = currentManifests[id];
                 CheckInstalled(previous, manifest);
-                if (upgrade) pinned.Add(id);
+                progress.Report(id, "Pinned", state: ProgressState.Completed, name: $"{id} {previous.Version}");
                 foreach (var dependency in manifest.Dependencies)
                 {
-                    await ResolveAsync(dependency.Id, null, source);
+                    await ResolveAsync(dependency.Id, null, source, id);
                 }
             }
             else
@@ -118,25 +122,26 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
 
                 foreach (var dependency in release.Dependencies)
                 {
-                    await ResolveAsync(dependency.Id, null, origin.Source);
+                    await ResolveAsync(dependency.Id, null, origin.Source, id);
                 }
 
                 if (downloads.Contains(id))
                 {
                     if (PackageArchive.Needs7Zip(release.Archive))
-                        await ResolveAsync(PackageArchive.ExtractorPackage, null, origin.Source);
+                        await ResolveAsync(PackageArchive.ExtractorPackage, null, origin.Source, id);
                     if (PackageArchive.NeedsBootstrap(release))
-                        await ResolveAsync(PackageArchive.BootstrapPackage, null, origin.Source);
+                        await ResolveAsync(PackageArchive.BootstrapPackage, null, origin.Source, id);
                     if (release.Script is not null && powerShell is null)
                     {
                         if (visiting.Contains("powershell"))
                             throw new IOException($"Installing '{id}' requires an existing PowerShell 7 installation.");
-                        await ResolveAsync("powershell", null, origin.Source);
+                        await ResolveAsync("powershell", null, origin.Source, id);
                         if (!manifests["powershell"].Commands.ContainsKey("pwsh.exe"))
                             throw new IOException("The PowerShell package must provide 'pwsh.exe' to run installation scripts.");
                     }
                 }
                 plan.Add((release, origin));
+                progress.Report(id, "Waiting", state: ProgressState.Waiting, name: $"{id} {release.Version}");
             }
 
             visiting.Remove(id);
@@ -175,7 +180,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             !SameManifest(currentManifests[package.Id], manifests[package.Id])).ToArray();
         var generation = Guid.NewGuid().ToString("N");
         var publishShims = changes.Length > 0 || (!upgrade && !shims.HasPublicGeneration(publicCommands.Keys));
-        using var transaction = new InstallTransaction(scope.Root);
+        using var transaction = new InstallTransaction(scope.Root, line => progress.WriteLine(line, Console.Error));
         if (publishShims)
         {
             foreach (var (id, commands) in dependencyCommands)
@@ -191,9 +196,10 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 var staged = await StagePackageAsync(release, origin, transaction.CreateStagingDirectory(release.Id),
                     dependencyCommands[release.Id].Count == 0 ? null : shims.DependencyDirectory(generation, release.Id),
                     powerShell, PackageArchive.NeedsBootstrap(release) ? GetTool(PackageArchive.BootstrapPackage) : null,
-                    PackageArchive.Needs7Zip(release.Archive) ? GetTool(PackageArchive.ExtractorPackage) : null, cancellationToken);
+                    PackageArchive.Needs7Zip(release.Archive) ? GetTool(PackageArchive.ExtractorPackage) : null, progress, cancellationToken);
                 transaction.PublishPackage(staged, PackageDirectory(selected[release.Id]));
             }
+            progress.Report(release.Id, "Awaiting commit");
             if (release.Id == "powershell") powerShell = ExistingPowerShell();
         }
 
@@ -214,10 +220,9 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 start.Environment["PATH"] = Path.Combine(scope.Root, prefix) + ";" + start.Environment["PATH"];
             start.ArgumentList.Add("--help");
             await InstallProcess.RunAsync(start, "installed tapka", cancellationToken,
-                async (process, token) => { await process.StandardOutput.ReadToEndAsync(token); }, TimeSpan.FromSeconds(30));
+                async (process, token) => { await process.StandardOutput.ReadToEndAsync(token); }, TimeSpan.FromSeconds(30), line => progress.WriteLine(line));
         }
 
-        foreach (var id in pinned) Console.WriteLine($"Skipping pinned package {id} {installed[id].Version}.");
         if (publishShims)
         {
             using var publication = await shims.LockPublicationAsync(cancellationToken);
@@ -244,35 +249,22 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 transaction.Dispose();
                 throw;
             }
-            foreach (var warning in warnings) Console.Error.WriteLine(warning);
+            foreach (var warning in warnings) progress.WriteLine(warning, Console.Error);
         }
         shims.RemoveRetired(publicCommands);
+        foreach (var (release, _) in plan)
+        {
+            var previous = installed.GetValueOrDefault(release.Id)?.Version;
+            var status = downloads.Contains(release.Id)
+                ? previous is null ? "Installed" : $"Updated {previous} -> {release.Version}"
+                : "Already installed";
+            progress.Report(release.Id, status, state: ProgressState.Completed);
+        }
+        progress.Dispose();
         if (upgrade)
         {
-            var updated = changes.Where(package => installed.GetValueOrDefault(package.Id)?.Version != package.Version).ToArray();
-            foreach (var package in updated)
-            {
-                var previous = installed.GetValueOrDefault(package.Id)?.Version;
-                Console.WriteLine(previous is null ? $"Installed {package.Id} {package.Version}."
-                    : $"{package.Id}: {previous} → {package.Version}");
-            }
-            Console.WriteLine(updated.Length == 0 ? "All selected packages are up to date." : $"Updated {updated.Length} package(s).");
-        }
-        else
-        {
-            if (!plan.Any(entry => entry.Release.Id == ids[0]))
-            {
-                var package = selected[ids[0]];
-                Console.WriteLine($"{package.Id}@{package.Selector} {package.Version} is already installed at \"{PackageDirectory(package)}\".");
-            }
-            foreach (var (release, _) in plan)
-            {
-                var package = selected[release.Id];
-                var name = package.Selector is null or "latest" ? package.Id : $"{package.Id}@{package.Selector}";
-                Console.WriteLine(downloads.Contains(release.Id)
-                    ? $"Installed {name} {package.Version} at \"{PackageDirectory(package)}\"."
-                    : $"{name} {package.Version} is already installed at \"{PackageDirectory(package)}\".");
-            }
+            var updated = changes.Count(package => installed.GetValueOrDefault(package.Id)?.Version != package.Version);
+            progress.WriteLine(updated == 0 ? "All selected packages are up to date." : $"Updated {updated} package(s).");
         }
     }
 
@@ -284,24 +276,29 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         left.Count == right.Count && left.All(entry => right.TryGetValue(entry.Key, out var value) && value == entry.Value);
 
     private async Task<string> StagePackageAsync(PackageRelease release, PackageRepository origin, string staging, string? dependencies,
-        string? powerShell, string? bootstrap, string? extractor, CancellationToken cancellationToken)
+        string? powerShell, string? bootstrap, string? extractor, ProgressTree progress, CancellationToken cancellationToken)
     {
         var installerDirectory = Directory.CreateDirectory(Path.Combine(staging, "download")).FullName;
         var installer = Path.Combine(installerDirectory, PackageRepository.GetDownloadFilename(release.DownloadUrl));
         var stagedPackage = Directory.CreateDirectory(Path.Combine(staging, "package")).FullName;
-        await DownloadAsync(release, installer, cancellationToken);
+        await DownloadAsync(release, installer, progress, cancellationToken);
         if (release.Archive is { } archive)
         {
-            await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, cancellationToken);
+            progress.Report(release.Id, "Extracting");
+            await PackageArchive.ExtractAsync(archive, installer, stagedPackage, extractor, cancellationToken,
+                line => progress.WriteLine($"{release.Id}: {line}"));
         }
         if (release.Script is not null)
         {
+            progress.Report(release.Id, "Running install script");
             var script = Path.Combine(staging, "install.ps1");
             await File.WriteAllBytesAsync(script, await origin.ReadScriptAsync(release, cancellationToken), cancellationToken);
             await RunScriptAsync(powerShell ?? throw new IOException("An existing PowerShell 7 installation is required."),
-                script, installer, stagedPackage, dependencies, bootstrap, cancellationToken);
+                script, installer, stagedPackage, dependencies, bootstrap, cancellationToken,
+                line => progress.WriteLine($"{release.Id}: {line}"));
         }
 
+        progress.Report(release.Id, "Checking package files");
         foreach (var (command, target) in release.Commands)
         {
             if (!File.Exists(Path.Combine(stagedPackage, target)))
@@ -319,21 +316,33 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
         return stagedPackage;
     }
 
-    private async Task DownloadAsync(PackageRelease release, string installer, CancellationToken cancellationToken)
+    private async Task DownloadAsync(PackageRelease release, string installer, ProgressTree progress, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(5));
         var sha256 = release.Checksum.Length == 64;
-        Console.WriteLine($"Downloading {release.Id} {release.Version}...");
+        progress.Report(release.Id, "Downloading");
         try
         {
             using var response = await http.GetAsync(release.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             response.EnsureSuccessStatusCode();
             await using (var output = new FileStream(installer, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
-                await response.Content.CopyToAsync(output, deadline.Token);
+                await using var source = await response.Content.ReadAsStreamAsync(deadline.Token);
+                var total = response.Content.Headers.ContentLength;
+                var buffer = new byte[81920];
+                long downloaded = 0;
+                int count;
+                while ((count = await source.ReadAsync(buffer, deadline.Token)) != 0)
+                {
+                    await output.WriteAsync(buffer.AsMemory(0, count), deadline.Token);
+                    downloaded += count;
+                    progress.Report(release.Id, $"Downloading ({downloaded:N0} bytes)",
+                        total is > 0 ? Math.Min(1, (double)downloaded / total.Value) : null);
+                }
             }
 
+            progress.Report(release.Id, "Verifying checksum");
             await using var input = File.OpenRead(installer);
             var hash = Convert.ToHexString(sha256 ? await SHA256.HashDataAsync(input, deadline.Token)
                 : await SHA512.HashDataAsync(input, deadline.Token));
@@ -369,7 +378,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
     }
 
     private static Task RunScriptAsync(string powerShell, string script, string installer, string destination,
-        string? dependencies, string? bootstrap, CancellationToken cancellationToken)
+        string? dependencies, string? bootstrap, CancellationToken cancellationToken, Action<string> diagnostic)
     {
         var start = new ProcessStartInfo(powerShell)
         {
@@ -394,6 +403,6 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             start.Environment["PATH"] = string.IsNullOrEmpty(inheritedPath) ? dependencies : $"{dependencies};{inheritedPath}";
         }
 
-        return InstallProcess.RunAsync(start, "PowerShell installation script", cancellationToken);
+        return InstallProcess.RunAsync(start, "PowerShell installation script", cancellationToken, diagnostic: diagnostic);
     }
 }

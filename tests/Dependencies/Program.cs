@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Tapka;
 
+ProgressTests.Run();
+
 var powerShell = PackageInstaller.FindSystemPowerShell() ?? throw new Exception("PowerShell 7 is required.");
 var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
 if (args is ["--archives", .. var archiveArgs])

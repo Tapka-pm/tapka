@@ -211,6 +211,21 @@ internal static class ArchiveTests
         {
             Check(!Directory.Exists(Package(id)) && await Installed(id) is null, $"Rollback left {id} installed.");
         }
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(installRoot, "installed.db"), Pooling = false
+        }.ToString()))
+        {
+            connection.Open();
+            using var sql = connection.CreateCommand();
+            sql.CommandText = "SELECT count(*) FROM installation_tools";
+            Check((long)sql.ExecuteScalar()! == 0, "A failed install left installation tool links.");
+            sql.CommandText = "DROP TABLE installation_tools";
+            sql.ExecuteNonQuery();
+        }
+        var legacyInfo = await Run(binary, root, "info", "zip", "--root", installRoot);
+        Check(legacyInfo.ExitCode == 0, "An older v2 inventory could not be read.");
+
         await Install("seven");
         Check(File.Exists(Package("7zip", "7z.dll")) && File.Exists(Package("7zr", "7zr.exe")) &&
             File.Exists(Package("powershell", "pwsh.exe")), "Bootstrap chain did not run.");
@@ -228,6 +243,21 @@ internal static class ArchiveTests
         Check(!Directory.Exists(shims.DependencyDirectory(shims.ActiveGeneration!, "seven")), "Archive tools became runtime dependencies.");
         await Install("seven-tail");
         Check(File.ReadAllText(Package("seven-tail", FileName)) == Text, "Wrong 7z output for an archive with trailing data.");
+        using (var inventory = await InstalledPackages.OpenForReadAsync(InstallScope.Create(installRoot), CancellationToken.None))
+        {
+            var extractor = new PackageVersion("7zip", assetVersions["7zip"]);
+            Check(inventory.Details("seven")!.Value.InstallationTools.SequenceEqual([extractor]) &&
+                inventory.Details("seven-tail")!.Value.InstallationTools.SequenceEqual([extractor]),
+                "Expected both archives to record the extractor version they used.");
+            var tool = inventory.Details("7zip")!.Value;
+            Check(tool.InstallationTools.SequenceEqual([new("7zr", assetVersions["7zr"]), new("powershell", assetVersions["powershell"])]) &&
+                tool.UsedToInstall.SequenceEqual([new("seven", "1"), new("seven-tail", "1")]),
+                "The registry did not record the bootstrap tools and the extractor's users.");
+            Check(inventory.Details("zip")!.Value.InstallationTools.Count == 0, "A built-in format recorded a package-managed tool.");
+        }
+        var toolInfo = await Run(binary, root, "info", "7zip", "--root", installRoot);
+        Check(toolInfo.ExitCode == 0 && toolInfo.Output.Contains($"Installation tools:{Environment.NewLine}  7zr {assetVersions["7zr"]}") &&
+            toolInfo.Output.Contains($"Used to install:{Environment.NewLine}  seven 1"), "Info did not report installation tool links.");
         var userPath = File.ReadAllText(Path.Combine(installRoot, "user-path.txt"));
         Check(userPath == Path.GetDirectoryName(Public("archive-test.exe")), "Unexpected PATH registration.");
 

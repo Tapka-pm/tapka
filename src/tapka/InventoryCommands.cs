@@ -35,7 +35,7 @@ internal static class InventoryCommands
         Configure(info, terminal, (inventory, scope, result) =>
         {
             var id = ReadId(result, infoId);
-            var (package, manifest, requiredBy) = inventory.Details(id) ?? throw NotInstalled(id);
+            var (package, manifest, requiredBy, installationTools, usedToInstall) = inventory.Details(id) ?? throw NotInstalled(id);
             var directory = Path.Combine(scope.Root, package.PackagePath);
             terminal.Out.WriteLine($"ID: {id}");
             terminal.Out.WriteLine($"Version: {package.Version}");
@@ -54,6 +54,8 @@ internal static class InventoryCommands
                 dependency.Rename.Count == 0 ? dependency.Id :
                 $"{dependency.Id} ({string.Join(", ", dependency.Rename.Select(pair => $"{pair.Key} -> {pair.Value}"))})"));
             PrintItems(terminal.Out, "Required by", requiredBy);
+            PrintItems(terminal.Out, "Installation tools", installationTools.Select(tool => $"{tool.Id} {tool.Version}"));
+            PrintItems(terminal.Out, "Used to install", usedToInstall.Select(consumer => $"{consumer.Id} {consumer.Version}"));
         });
         Configure(path, terminal, (inventory, scope, result) =>
         {

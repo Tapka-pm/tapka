@@ -10,6 +10,8 @@ internal sealed record InstalledPackage(string Id, string Version, string? Selec
     public bool IsPinned => Selector == Version;
 }
 
+internal readonly record struct PackageVersion(string Id, string Version);
+
 internal sealed class InstalledPackages : IDisposable
 {
     private const int SchemaVersion = 2;
@@ -161,6 +163,7 @@ internal sealed class InstalledPackages : IDisposable
                     REFERENCES dependencies(package_id, dependency_id) ON DELETE CASCADE
             );
             {VersionsSchema}
+            {InstallationToolsSchema}
             PRAGMA user_version = {SchemaVersion};
             """, transaction);
         schema.ExecuteNonQuery();
@@ -191,6 +194,18 @@ internal sealed class InstalledPackages : IDisposable
             PRIMARY KEY (id, version)
         );
         INSERT INTO package_versions SELECT id, version, architecture, repository, download_url, checksum, relative_path FROM packages;
+        """;
+
+    // This additive table also works with clients that only know the v2 inventory.
+    private const string InstallationToolsSchema = """
+        CREATE TABLE IF NOT EXISTS installation_tools (
+            package_id TEXT NOT NULL, package_version TEXT NOT NULL COLLATE NOCASE,
+            tool_id TEXT NOT NULL, tool_version TEXT NOT NULL COLLATE NOCASE,
+            PRIMARY KEY (package_id, package_version, tool_id),
+            FOREIGN KEY (package_id, package_version) REFERENCES package_versions(id, version) ON DELETE CASCADE,
+            FOREIGN KEY (tool_id, tool_version) REFERENCES package_versions(id, version)
+        );
+        CREATE INDEX IF NOT EXISTS installation_tools_reverse ON installation_tools(tool_id, tool_version, package_id);
         """;
 
     public InstalledPackage? FindVersion(string id, string version)
@@ -228,7 +243,8 @@ internal sealed class InstalledPackages : IDisposable
         return reader.Read() ? ReadPackage(reader) : null;
     }
 
-    public (InstalledPackage Package, PackageManifest Manifest, IReadOnlyList<string> RequiredBy)? Details(string id)
+    public (InstalledPackage Package, PackageManifest Manifest, IReadOnlyList<string> RequiredBy,
+        IReadOnlyList<PackageVersion> InstallationTools, IReadOnlyList<PackageVersion> UsedToInstall)? Details(string id)
     {
         using var snapshot = connection.BeginTransaction(deferred: true);
         if (Find(id, snapshot) is not { } package)
@@ -236,15 +252,44 @@ internal sealed class InstalledPackages : IDisposable
             return null;
         }
         var manifest = ReadManifests([id], id, snapshot)[id];
-        using var command = CreateCommand(
-            "SELECT package_id FROM dependencies WHERE dependency_id = $id ORDER BY package_id", snapshot, ("$id", id));
-        using var reader = command.ExecuteReader();
         var requiredBy = new List<string>();
+        using (var command = CreateCommand(
+            "SELECT package_id FROM dependencies WHERE dependency_id = $id ORDER BY package_id", snapshot, ("$id", id)))
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                requiredBy.Add(reader.GetString(0));
+            }
+        }
+        var (tools, installedWithTool) = ReadInstallationTools(package, snapshot);
+        return (package, manifest, requiredBy, tools, installedWithTool);
+    }
+
+    private (List<PackageVersion> Tools, List<PackageVersion> InstalledWithTool) ReadInstallationTools(InstalledPackage package,
+        SqliteTransaction transaction)
+    {
+        using var table = CreateCommand("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'installation_tools'", transaction);
+        if (table.ExecuteScalar() is null) return ([], []);
+
+        using var command = CreateCommand("""
+            SELECT tool_id AS id, tool_version AS version, 0 AS reverse FROM installation_tools
+            WHERE package_id = $id AND package_version = $version
+            UNION ALL
+            SELECT p.id, p.version, 1 FROM installation_tools i
+            JOIN packages p ON p.id = i.package_id AND i.package_version = p.version
+            WHERE i.tool_id = $id AND i.tool_version = $version
+            ORDER BY reverse, id, version
+            """, transaction, ("$id", package.Id), ("$version", package.Version));
+        using var reader = command.ExecuteReader();
+        var tools = new List<PackageVersion>();
+        var installedWithTool = new List<PackageVersion>();
         while (reader.Read())
         {
-            requiredBy.Add(reader.GetString(0));
+            var list = reader.GetBoolean(2) ? installedWithTool : tools;
+            list.Add(new PackageVersion(reader.GetString(0), reader.GetString(1)));
         }
-        return (package, manifest, requiredBy);
+        return (tools, installedWithTool);
     }
 
     // Install holds the scope lock, so its package rows and manifests come from the same installed state.
@@ -322,6 +367,18 @@ internal sealed class InstalledPackages : IDisposable
                 Execute("INSERT INTO dependency_renames VALUES ($id, $dependency, $name, $renamed)", transaction,
                     ("$id", package.Id), ("$dependency", dependency.Id), ("$name", name), ("$renamed", renamed));
             }
+        }
+    }
+
+    public void SaveInstallationTools(IReadOnlyList<(InstalledPackage Package, InstalledPackage Tool)> tools,
+        SqliteTransaction transaction)
+    {
+        if (tools.Count == 0) return;
+        Execute(InstallationToolsSchema, transaction);
+        foreach (var (package, tool) in tools)
+        {
+            Execute("INSERT INTO installation_tools VALUES ($id, $version, $tool, $toolVersion)", transaction,
+                ("$id", package.Id), ("$version", package.Version), ("$tool", tool.Id), ("$toolVersion", tool.Version));
         }
     }
 

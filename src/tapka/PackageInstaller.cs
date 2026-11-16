@@ -46,6 +46,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
             var selected = new Dictionary<string, InstalledPackage>(installed);
             var shims = new PackageShims(scope.Root);
             var plan = new List<(PackageRelease Release, PackageRepository Repository)>();
+            var installationTools = new List<(InstalledPackage Package, InstalledPackage Tool)>();
             var downloads = new HashSet<string>();
             var visiting = new HashSet<string>();
             var resolved = new HashSet<string>();
@@ -65,10 +66,16 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 return result;
             }
 
-            string? ExistingPowerShell() => selected.TryGetValue("powershell", out var package) &&
-                manifests["powershell"].Commands.TryGetValue("pwsh.exe", out var target) &&
-                File.Exists(Path.Combine(PackageDirectory(package), target))
-                    ? Path.Combine(PackageDirectory(package), target) : systemPowerShell;
+            (string? Path, InstalledPackage? Package) ExistingPowerShell()
+            {
+                if (selected.TryGetValue("powershell", out var package) &&
+                    manifests["powershell"].Commands.TryGetValue("pwsh.exe", out var target))
+                {
+                    var path = Path.Combine(PackageDirectory(package), target);
+                    if (File.Exists(path)) return (path, package);
+                }
+                return (systemPowerShell, null);
+            }
 
             var powerShell = ExistingPowerShell();
 
@@ -88,7 +95,8 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 dep.SetStatus(DepStatus.Awaiting, detail: "Resolving");
 
                 var previous = installed.GetValueOrDefault(id);
-                var source = upgrade ? sourceOverride ?? previous?.Repository ?? (previous is null ? parentSource : null)
+                var source = upgrade
+                    ? sourceOverride ?? previous?.Repository ?? (previous is null ? parentSource : null) ?? repository.Source
                     : repository.Source;
                 if (previous is { IsPinned: true } &&
                     (requestedVersion is null || !refreshCatalog && requestedVersion == previous.Version))
@@ -104,7 +112,6 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                 }
                 else
                 {
-                    if (source is null) throw new IOException($"The repository for '{id}' is unknown. Specify --repository.");
                     var origin = await ReadRepositoryAsync(source);
                     var release = await origin.ResolveAsync(id, requestedVersion ?? previous?.Selector ?? "latest",
                         architecture, cancellationToken);
@@ -156,7 +163,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                             await ResolveAsync(PackageArchive.ExtractorPackage, null, origin.Source, dep);
                         if (PackageArchive.NeedsBootstrap(release))
                             await ResolveAsync(PackageArchive.BootstrapPackage, null, origin.Source, dep);
-                        if (release.Script is not null && powerShell is null)
+                        if (release.Script is not null && powerShell.Path is null)
                         {
                             if (visiting.Contains("powershell"))
                                 throw new IOException($"Installing '{id}' requires an existing PowerShell 7 installation.");
@@ -204,19 +211,25 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                     shims.WriteDependencies(generation, id, commands, dependencyCommands, selected, transaction);
             }
 
-            string GetTool(string id) => PackageArchive.GetTool(PackageDirectory(selected[id]), id, manifests[id].Commands);
+            string? GetTool(InstalledPackage? tool) => tool is null ? null :
+                PackageArchive.GetTool(PackageDirectory(tool), tool.Id, manifests[tool.Id].Commands);
             foreach (var (release, origin) in plan)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var dep = deps[release.Id];
                 if (downloads.Contains(release.Id))
                 {
+                    var package = selected[release.Id];
+                    var extractor = PackageArchive.Needs7Zip(release.Archive) ? selected[PackageArchive.ExtractorPackage] : null;
+                    var bootstrap = PackageArchive.NeedsBootstrap(release) ? selected[PackageArchive.BootstrapPackage] : null;
                     var staged = await StagePackageAsync(release, origin, transaction.CreateStagingDirectory(release.Id),
                         dependencyCommands[release.Id].Count == 0 ? null : shims.DependencyDirectory(generation, release.Id),
-                        powerShell, PackageArchive.NeedsBootstrap(release) ? GetTool(PackageArchive.BootstrapPackage) : null,
-                        PackageArchive.Needs7Zip(release.Archive) ? GetTool(PackageArchive.ExtractorPackage) : null,
-                        dep, output, cancellationToken);
-                    transaction.PublishPackage(staged, PackageDirectory(selected[release.Id]));
+                        powerShell.Path, GetTool(bootstrap), GetTool(extractor), dep, output, cancellationToken);
+                    transaction.PublishPackage(staged, PackageDirectory(package));
+                    foreach (var tool in new[] { extractor, bootstrap, release.Script is null ? null : powerShell.Package })
+                    {
+                        if (tool is not null) installationTools.Add((package, tool));
+                    }
                     dep.SetStatus(DepStatus.Installing, detail: "Awaiting commit");
                 }
                 if (release.Id == "powershell") powerShell = ExistingPowerShell();
@@ -255,6 +268,7 @@ internal sealed class PackageInstaller(InstallScope scope, PackageRepository rep
                         cancellationToken.ThrowIfCancellationRequested();
                         inventory.Save(package, manifests[package.Id], database);
                     }
+                    inventory.SaveInstallationTools(installationTools, database);
                     warnings = publicCommands.Count == 0 ? [] : scope.RegisterShims(shims.PublicDirectory,
                         changes.Where(package => package.Selector is not null).SelectMany(package => manifests[package.Id].Commands.Keys), transaction);
                     cancellationToken.ThrowIfCancellationRequested();

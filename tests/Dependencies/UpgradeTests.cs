@@ -220,10 +220,18 @@ internal static class UpgradeTests
         {
             connection.Open();
             using var sql = connection.CreateCommand();
-            sql.CommandText = "DROP TABLE package_versions; ALTER TABLE packages DROP COLUMN relative_path; PRAGMA user_version = 1;";
+            sql.CommandText = "DROP TABLE installation_tools; DROP TABLE package_versions; ALTER TABLE packages DROP COLUMN relative_path; PRAGMA user_version = 1;";
             sql.ExecuteNonQuery();
         }
         Check((await Command("path", "old-app")).Trim() == legacy, "Reading the v1 database lost the legacy path.");
+
+        var official = Path.Combine(root, "packages-master");
+        var officialZip = Path.Combine(downloads, "official-repository.zip");
+        Recipe(official, "old-app", "1", "old-app", cmd, []);
+        ZipFile.CreateFromDirectory(official, officialZip, CompressionLevel.Fastest, includeBaseDirectory: true);
+        Check((await Command("upgrade")).Contains("All selected packages are up to date."),
+            "A legacy package at the current version did not resolve through the official catalog.");
+        Check((await Command("path", "old-app")).Trim() == legacy, "Upgrading to the same version changed the legacy path.");
 
         var legacyShims = new PackageShims(installation);
         var oldLauncher = Path.Combine(Directory.CreateDirectory(legacyShims.PublicDirectory).FullName, "old-app.exe");
@@ -232,13 +240,20 @@ internal static class UpgradeTests
         template.CopyTo(shimBytes);
         var embedded = ShimBinary.Create(shimBytes.ToArray(), @"..\..", @"packages\old-app\tool.exe", "");
         File.WriteAllBytes(oldLauncher, embedded);
-        Recipe(local, "old-app", "2", "old-app", cmd, []);
-        await Command("upgrade", "old-app", "--repository", local);
+        Recipe(official, "old-app", "2", "old-app", cmd, []);
+        File.Delete(officialZip);
+        ZipFile.CreateFromDirectory(official, officialZip, CompressionLevel.Fastest, includeBaseDirectory: true);
+        await Command("update");
+        await Command("upgrade");
         await CheckPath("old-app", "2");
         var archive = Path.Combine(legacyShims.GenerationDirectory(legacyShims.ActiveGeneration!), "legacy", "old-app.exe");
         Check(File.ReadAllBytes(archive).SequenceEqual(embedded) && File.Exists(Path.Combine(legacy, "tool.exe")) &&
             (await ArchiveTests.Run(oldLauncher, root, "/d", "/c", "exit 42")).ExitCode == 42,
             "Migration lost the old executable or failed to switch the shim.");
+
+        Recipe(local, "old-app", "3", "old-app", cmd, []);
+        await Command("upgrade", "old-app", "--repository", local);
+        await CheckPath("old-app", "3");
         Console.WriteLine("Upgrade integration tests passed.");
     }
 

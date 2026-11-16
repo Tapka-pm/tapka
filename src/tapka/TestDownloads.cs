@@ -10,6 +10,10 @@ internal sealed class TestDownloads(string directory) : HttpMessageHandler
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (request.RequestUri?.AbsoluteUri == "https://github.com/Tapka-pm/packages/archive/refs/heads/master.zip")
+        {
+            return Task.FromResult(Respond(Path.Combine(root, "official-repository.zip")));
+        }
         if (request.RequestUri is not { Scheme: "https", Host: "fixtures.tapka.invalid", IsDefaultPort: true } uri)
         {
             throw new HttpRequestException($"Unmapped integration test URL '{request.RequestUri}'.");

@@ -4,5 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsAotCompatible>true</IsAotCompatible>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**</DefaultItemExcludes>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tapka.Progress.Tests" />
+  </ItemGroup>
 </Project>

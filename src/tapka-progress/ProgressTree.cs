@@ -19,6 +19,7 @@ public sealed class ProgressTree : IDisposable
     private readonly List<string> roots = [];
     private readonly TextWriter output;
     private readonly bool interactive;
+    private readonly Func<(int Width, int Height)> getSize;
     private readonly CancellationToken cancellationToken;
     private readonly Timer? timer;
     private int drawnLines;
@@ -28,12 +29,21 @@ public sealed class ProgressTree : IDisposable
 
     /// <param name="output">An explicit writer uses plain text output, suitable for logs and tests.</param>
     public ProgressTree(TextWriter? output = null, CancellationToken cancellationToken = default)
+        : this(output ?? Console.Out,
+            output is null && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb",
+            () => (Console.WindowWidth, Console.WindowHeight), cancellationToken)
     {
-        this.output = output ?? Console.Out;
+        if (interactive) timer = new Timer(_ => RenderFrame(), null, 0, 100);
+    }
+
+    // Tests drive frames explicitly; the public constructor owns automatic rendering.
+    internal ProgressTree(TextWriter output, bool interactive, Func<(int Width, int Height)> getSize,
+        CancellationToken cancellationToken = default)
+    {
+        this.output = output;
+        this.interactive = interactive;
+        this.getSize = getSize;
         this.cancellationToken = cancellationToken;
-        interactive = output is null && !Console.IsOutputRedirected &&
-            Environment.GetEnvironmentVariable("TERM") != "dumb";
-        if (interactive) timer = new Timer(_ => Tick(), null, 0, 100);
     }
 
     public void Add(string id, string? parentId = null)
@@ -139,16 +149,17 @@ public sealed class ProgressTree : IDisposable
         }
     }
 
-    private void Tick()
+    internal void RenderFrame()
     {
         lock (gate)
         {
-            if (disposed || pauses > 0) return;
+            if (!interactive || disposed || pauses > 0) return;
             try
             {
                 Clear();
-                var width = Math.Max(1, Console.WindowWidth - 1);
-                var height = Math.Max(1, Console.WindowHeight - 2);
+                var size = getSize();
+                var width = Math.Max(1, size.Width - 1);
+                var height = Math.Max(1, size.Height - 2);
                 var lines = Lines();
                 var visible = lines.Take(height).ToList();
                 if (lines.Count > height) visible[^1] = $"... {lines.Count - height + 1} more rows (full tree on completion)";

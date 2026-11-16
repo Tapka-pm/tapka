@@ -108,7 +108,9 @@ progress.Report("dependency", "Installed", state: ProgressState.Completed);
 progress.Report("app", "Installed", state: ProgressState.Completed);
 ```
 
-`Report` безопасен для параллельных вызовов. `WriteLine` выводит диагностику, `Pause` временно передаёт консоль внешнему компоненту, `Snapshot` возвращает текст дерева. Передача `TextWriter` конструктору включает текстовый режим для логов и тестов. `Dispose` останавливает перерисовку и сохраняет итог; незавершённые узлы помечаются как прерванные. Тесты библиотеки запускаются вместе с `dotnet run --project tests/Dependencies`.
+`Report` безопасен для параллельных вызовов. `WriteLine` выводит диагностику, `Pause` временно передаёт консоль внешнему компоненту, `Snapshot` возвращает текст дерева. Передача `TextWriter` конструктору включает текстовый режим для логов и тестов. `Dispose` останавливает перерисовку и сохраняет итог; незавершённые узлы помечаются как прерванные.
+
+Тесты библиотеки запускаются отдельно командой `dotnet test src/tapka-progress/Tests` из каталога клиента; нужны .NET 11 SDK и Windows x64. Они используют `Tapka.Terminal.Testing` для проверки итогового экрана и ANSI-перерисовки. Кадры запускаются вручную с фиксированными размерами терминала, без ожидания таймера. Inline-снимки по умолчанию только проверяются. Для явного обновления задайте `INLINESNAPSHOTTESTING_STRATEGY=OverwriteWithoutFailure`, запустите тесты, удалите переменную, просмотрите `git diff` и повторите запуск в обычном режиме. Подробнее — в [README Tapka.Terminal.Testing](src/Tapka.Terminal.Testing/README.md#run-tests-and-update-inline-snapshots).
 
 ## Обновление каталога и пакетов
 

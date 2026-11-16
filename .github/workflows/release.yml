@@ -45,6 +45,8 @@ jobs:
         run: |
           dotnet test tests/Shim.Tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test src/tapka-progress/Tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./build.ps1 -Test -Target All -Version $env:TAPKA_VERSION
           dotnet run --project tests/Dependencies
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
